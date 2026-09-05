@@ -1,0 +1,5 @@
+{
+  "name": "DirectAuth",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}
