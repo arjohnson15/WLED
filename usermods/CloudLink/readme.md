@@ -59,10 +59,14 @@ Controller → cloud:
 | `{"type":"state","body":{...}}` | pushed after every state change (debounced 300 ms) and once after `welcome` |
 | `{"type":"pong"}` | reply to app-level ping |
 
-Relayed paths: `GET /json`, `/json/state`, `/json/info`, `/json/si`, `/json/eff`,
-`/json/pal`, `/json/palx?page=N`, `/json/nodes`, `/json/fxda`; `POST /json` and
-`/json/state` (WLED state JSON); `GET /win&...` (WLED HTTP API, returns state).
-Responses larger than WLED's JSON buffer (24 KB on ESP32) return status 507.
+Relayed paths (matched loosely, like WLED's own `/json` handler, so the stock UI's
+URLs work unchanged): `GET /json`, `/json/state`, `/json/info`, `/json/si`,
+`/json/eff[ects]`, `/json/pal[ettes]`, `/json/palx?page=N`, `/json/nodes`,
+`/json/fxda[ta]`, `/json/live` (every n-th LED as `"RRGGBB"`, max 512, brightness
+applied, same shape as WLED's), `/presets.json` (raw file); `POST /json`,
+`/json/state`, `/json/si` (WLED state JSON, returns state); `GET /win&...` (WLED HTTP
+API, returns state). Responses larger than WLED's JSON buffer (24 KB on ESP32) return
+status 507; `presets.json` is capped at 32 KB.
 
 The controller sends a WebSocket PING every 20 s and drops the link if no PONG arrives
 within 10 s. Reconnects back off from 5 s to 2 min; a link that lasted over a minute

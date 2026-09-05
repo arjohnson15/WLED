@@ -217,43 +217,87 @@ class CloudLinkUsermod : public Usermod {
     }
 
     // ---------- inbound ----------
+    // Response frames that bypass ArduinoJson (large or pre-serialised bodies).
+    void sendRawResponse(uint32_t id, int status, const String& rawBody) {
+      String out;
+      out.reserve(rawBody.length() + 48);
+      out = F("{\"type\":\"res\",\"id\":");
+      out += id;
+      out += F(",\"status\":");
+      out += status;
+      out += F(",\"body\":");
+      out += rawBody;
+      out += '}';
+      send(out);
+    }
+
+    // Same output as WLED's /json/live: every n-th LED as "RRGGBB" with brightness applied.
+    String buildLiveLeds() {
+      const unsigned maxLeds = 512;
+      unsigned used = strip.getLengthTotal();
+      unsigned n = used ? (used - 1) / maxLeds + 1 : 1;
+      String out;
+      out.reserve(9 + 9 * (used / n + 1) + 16);
+      out = F("{\"leds\":[");
+      char hex[10];
+      bool first = true;
+      for (unsigned i = 0; i < used; i += n) {
+        uint32_t c = strip.getPixelColor(i);
+        uint8_t r = R(c), g = G(c), b = B(c), w = W(c);
+        r = scale8(qadd8(w, r), strip.getBrightness());
+        g = scale8(qadd8(w, g), strip.getBrightness());
+        b = scale8(qadd8(w, b), strip.getBrightness());
+        snprintf_P(hex, sizeof(hex), PSTR("%s\"%02X%02X%02X\""), first ? "" : ",", r, g, b);
+        out += hex;
+        first = false;
+      }
+      out += F("],\"n\":");
+      out += n;
+      out += '}';
+      return out;
+    }
+
     // Executes one relayed API request. `root` is the parsed frame living in pDoc;
     // the response is built in pDoc afterwards, so everything needed is copied first.
     void handleRelayRequest(JsonObject root) {
-      uint32_t id     = root["id"] | 0UL;
-      String   method = root["method"] | "GET";
+      uint32_t id       = root["id"] | 0UL;
+      String   method   = root["method"] | "GET";
       String   fullPath = root["path"] | "";
-      int      q = fullPath.indexOf('?');
+      int      q        = fullPath.indexOf('?');
       String   pathOnly = q >= 0 ? fullPath.substring(0, q) : fullPath;
       String   query    = q >= 0 ? fullPath.substring(q + 1) : String();
       method.toUpperCase();
 
-      enum class Target { none, state, info, si, effects, palettes, palx, nodes, fxdata, all };
+      enum class Target { none, state, info, si, effects, palettes, palx, nodes, fxdata, all, live, presets };
       Target target = Target::none;
       int status = 200;
+      bool isJson = pathOnly.startsWith("/json");
+      String sub = isJson ? pathOnly.substring(5) : String();   // "" or "/state", "/si", ...
 
-      if (method == "POST" && pathOnly == "/json/state") {
-        JsonObject body = root["body"];
-        if (body.isNull()) status = 400;
-        else { deserializeState(body, CALL_MODE_DIRECT_CHANGE); target = Target::state; }
-      } else if (method == "POST" && pathOnly == "/json") {
+      if (method == "POST" && isJson && (sub == "" || sub == "/state" || sub == "/si")) {
         JsonObject body = root["body"];
         if (body.isNull()) status = 400;
         else { deserializeState(body, CALL_MODE_DIRECT_CHANGE); target = Target::state; }
       } else if (pathOnly.startsWith("/win")) {
         handleSet(nullptr, fullPath, true);
         target = Target::state;
-      } else if (method == "GET") {
-        if      (pathOnly == "/json/state") target = Target::state;
-        else if (pathOnly == "/json/info")  target = Target::info;
-        else if (pathOnly == "/json/si")    target = Target::si;
-        else if (pathOnly == "/json/eff")   target = Target::effects;
-        else if (pathOnly == "/json/pal")   target = Target::palettes;
-        else if (pathOnly == "/json/palx")  target = Target::palx;
-        else if (pathOnly == "/json/nodes") target = Target::nodes;
-        else if (pathOnly == "/json/fxda")  target = Target::fxdata;
-        else if (pathOnly == "/json")       target = Target::all;
+      } else if (method == "GET" && pathOnly == "/presets.json") {
+        target = Target::presets;
+      } else if (method == "GET" && isJson) {
+        // same loose matching as WLED's serveJson(), so the stock UI's URLs work unchanged
+        if      (sub == "")                    target = Target::all;
+        else if (sub.indexOf("state") > 0)     target = Target::state;
+        else if (sub.indexOf("info") > 0)      target = Target::info;
+        else if (sub.indexOf("si") > 0)        target = Target::si;
+        else if (sub.indexOf("nodes") > 0)     target = Target::nodes;
+        else if (sub.indexOf("eff") > 0)       target = Target::effects;
+        else if (sub.indexOf("palx") > 0)      target = Target::palx;
+        else if (sub.indexOf("fxda") > 0)      target = Target::fxdata;
+        else if (sub.indexOf("live") > 0)      target = Target::live;
+        else if (sub.indexOf("pal") > 0)       target = Target::palettes;
         else status = 404;
+      } else if (method == "GET") {
+        status = 404;
       } else {
         status = 405;
       }
@@ -261,6 +305,19 @@ class CloudLinkUsermod : public Usermod {
       int page = 0;
       int pp = query.indexOf(F("page="));
       if (pp >= 0) page = query.substring(pp + 5).toInt();
+
+      // bodies that are built outside ArduinoJson
+      if (status == 200 && target == Target::live) { sendRawResponse(id, 200, buildLiveLeds()); return; }
+      if (status == 200 && target == Target::presets) {
+        File f = WLED_FS.open("/presets.json", "r");
+        if (!f) { sendRawResponse(id, 200, F("{}")); return; }
+        if (f.size() > 32768) { f.close(); sendRawResponse(id, 507, F("{\"error\":\"presets.json too large\"}")); return; }
+        String body = f.readString();
+        f.close();
+        if (!body.length()) body = F("{}");
+        sendRawResponse(id, 200, body);
+        return;
+      }
 
       pDoc->clear();
       JsonObject res = pDoc->to<JsonObject>();
