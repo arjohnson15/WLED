@@ -57,6 +57,8 @@ void serializeNodes(JsonObject root);
 #define CL_RX_QUEUE_LEN        4
 #define CL_TX_QUEUE_LEN        8
 #define CL_MAX_MSG_LEN         JSON_BUFFER_SIZE   // frames bigger than WLED's JSON buffer are dropped
+#define CL_MAX_PRESETS         32768              // presets.json larger than this answers 507
+#define CL_MAX_LIVE_LEDS       256                // same as MAX_LIVE_LEDS in json.cpp (file-local there)
 #define CL_READ_CHUNK          1024
 #define CL_CONNECT_TIMEOUT_MS  10000
 #define CL_READ_TIMEOUT_MS     200
@@ -69,6 +71,8 @@ void serializeNodes(JsonObject root);
 #define CL_STATE_DEBOUNCE_MS   300
 #define CL_MAX_CODE_LEN        32
 #define CL_MAX_HOST_LEN        128
+// esp_transport_ws_send_raw() writes the opcode byte verbatim; the FIN bit must be set by the caller
+#define WS_FIN(op)             ((ws_transport_opcodes_t)((op) | WS_TRANSPORT_OPCODES_FIN))
 
 class CloudLinkUsermod : public Usermod {
   private:
@@ -94,8 +98,12 @@ class CloudLinkUsermod : public Usermod {
     volatile bool authenticated      = false;   // cloud accepted hello (set by main loop)
     volatile bool linkUpPending      = false;   // task -> main: send hello/pair
     volatile bool reconnectRequested = false;   // main -> task: drop and rebuild connection
-    volatile int  lastErrno          = 0;
-    String        lastError;                    // human readable, for /cloud/status and the info page
+    // Last error as two word-sized values (safe to write from the network task and read from
+    // the web/main tasks without a lock); rendered to text on demand by errorText().
+    enum ErrCode : uint8_t { CLE_NONE, CLE_TRANSPORT_INIT, CLE_WS_INIT, CLE_HANDSHAKE, CLE_CONNECT, CLE_WRITE, CLE_SOCKET, CLE_READ, CLE_LOST, CLE_CLOSED, CLE_PONG, CLE_SERVER, CLE_QUEUE_FULL };
+    volatile uint8_t lastErrCode   = CLE_NONE;
+    volatile int     lastErrDetail = 0;         // errno, HTTP status or server error index
+    static const char* const serverErrors[];    // server error codes we know, indexed for lastErrDetail
     unsigned long lastConnectMs      = 0;
     unsigned long lastDisconnectMs   = 0;
     uint32_t      reconnects         = 0;
@@ -109,8 +117,23 @@ class CloudLinkUsermod : public Usermod {
     static const char _enabled[];
 
     // ---------- locking helpers ----------
-    void lock()   { if (cfgMtx) xSemaphoreTake(cfgMtx, portMAX_DELAY); }
+    // Bounded wait (docs/cpp.instructions.md: never portMAX_DELAY). Callers skip their update
+    // when the lock is not obtained rather than stalling the LED loop.
+    bool lock()   { return !cfgMtx || xSemaphoreTake(cfgMtx, pdMS_TO_TICKS(250)) == pdTRUE; }
     void unlock() { if (cfgMtx) xSemaphoreGive(cfgMtx); }
+
+    void setErr(ErrCode code, int detail = 0) { lastErrCode = code; lastErrDetail = detail; }
+    String errorText() {
+      static const char* const names[] = { "", "transport init failed", "ws init failed", "handshake rejected, HTTP ", "connect failed", "write failed",
+                                           "socket error", "read failed", "connection lost", "closed by server", "pong timeout", "server error: ", "send queue full" };
+      uint8_t c = lastErrCode; int d = lastErrDetail;
+      if (c == CLE_NONE || c >= sizeof(names) / sizeof(names[0])) return String();
+      String t = names[c];
+      if (c == CLE_HANDSHAKE) t += d;
+      else if (c == CLE_SERVER) t += (d >= 0 && d < 6) ? serverErrors[d] : "unknown";
+      else if (d) { t += F(" (errno "); t += d; t += ')'; }
+      return t;
+    }
 
     // ---------- identity ----------
     void loadIdentity() {
@@ -138,11 +161,24 @@ class CloudLinkUsermod : public Usermod {
     }
 
     void clearIdentity() {
-      lock();
-      deviceId = ""; deviceToken = "";
-      unlock();
+      if (lock()) { deviceId = ""; deviceToken = ""; unlock(); }
       WLED_FS.remove(CL_IDENTITY_FILE);
       authenticated = false;
+    }
+
+    // Single place that validates and stores the connection settings, used by the settings
+    // page (readFromConfig) and by POST /cloud/pair so both accept exactly the same values.
+    // Returns true when something changed (caller then asks the task to reconnect).
+    bool applyConnectionSettings(String nHost, int nPort, bool nTls, String nPath) {
+      nHost.trim(); nPath.trim();
+      int scheme = nHost.indexOf("://"); if (scheme >= 0) nHost = nHost.substring(scheme + 3);   // people paste URLs
+      int slash = nHost.indexOf('/');    if (slash >= 0) nHost = nHost.substring(0, slash);
+      if (nHost.length() > CL_MAX_HOST_LEN) nHost = nHost.substring(0, CL_MAX_HOST_LEN);
+      if (nPort <= 0 || nPort > 65535) nPort = CL_DEFAULT_PORT;
+      if (!nPath.startsWith("/")) nPath = CL_DEFAULT_PATH;
+      bool changed = nHost != host || nPort != port || nTls != tls || nPath != path;
+      if (changed && lock()) { host = nHost; port = nPort; tls = nTls; path = nPath; unlock(); }
+      return changed;
     }
 
     void loadCaOverride() {
@@ -168,11 +204,25 @@ class CloudLinkUsermod : public Usermod {
     bool hasToken() { return deviceToken.length() > 0; }
 
     // ---------- outbound ----------
+    // Queues a NUL-terminated frame allocated with d_malloc(); takes ownership.
+    void sendOwned(char* frame) {
+      if (!frame) return;
+      if (!connected || !txq || xQueueSend(txq, &frame, 0) != pdTRUE) { d_free(frame); setErr(CLE_QUEUE_FULL); }
+    }
     void send(const String& frame) {
       if (!connected || !txq) return;
-      char* copy = strdup(frame.c_str());
+      char* copy = (char*)d_malloc(frame.length() + 1);
       if (!copy) return;
-      if (xQueueSend(txq, &copy, 0) != pdTRUE) free(copy);
+      memcpy(copy, frame.c_str(), frame.length() + 1);
+      sendOwned(copy);
+    }
+    // Serialises pDoc straight into one right-sized buffer and queues it.
+    void sendDoc() {
+      size_t len = measureJson(*pDoc);
+      char* buf = (char*)d_malloc(len + 1);
+      if (!buf) { setErr(CLE_QUEUE_FULL); return; }
+      serializeJson(*pDoc, buf, len + 1);
+      sendOwned(buf);
     }
 
     void addIdentityFields(JsonObject root) {
@@ -188,7 +238,7 @@ class CloudLinkUsermod : public Usermod {
       if (!guard) { linkUpPending = true; return; }   // retry next loop
       pDoc->clear();
       JsonObject root = pDoc->to<JsonObject>();
-      lock();
+      if (!lock()) { linkUpPending = true; return; }
       if (hasToken()) {
         root["type"] = "hello";
         root["id"]   = deviceId;
@@ -198,9 +248,7 @@ class CloudLinkUsermod : public Usermod {
       }
       unlock();
       addIdentityFields(root);
-      String out;
-      serializeJson(*pDoc, out);
-      send(out);
+      sendDoc();
     }
 
     void pushState() {
@@ -211,37 +259,61 @@ class CloudLinkUsermod : public Usermod {
       root["type"] = "state";
       JsonObject body = root.createNestedObject("body");
       serializeState(body);
-      String out;
-      serializeJson(*pDoc, out);
-      send(out);
+      sendDoc();
     }
 
     // ---------- inbound ----------
     // Response frames that bypass ArduinoJson (large or pre-serialised bodies).
+    static size_t resHeader(char* buf, size_t cap, uint32_t id, int status) {
+      return snprintf_P(buf, cap, PSTR("{\"type\":\"res\",\"id\":%lu,\"status\":%d,\"body\":"), (unsigned long)id, status);
+    }
     void sendRawResponse(uint32_t id, int status, const String& rawBody) {
-      String out;
-      out.reserve(rawBody.length() + 48);
-      out = F("{\"type\":\"res\",\"id\":");
-      out += id;
-      out += F(",\"status\":");
-      out += status;
-      out += F(",\"body\":");
-      out += rawBody;
-      out += '}';
-      send(out);
+      char* buf = (char*)d_malloc(rawBody.length() + 64);
+      if (!buf) { setErr(CLE_QUEUE_FULL); return; }
+      size_t n = resHeader(buf, 64, id, status);
+      memcpy(buf + n, rawBody.c_str(), rawBody.length()); n += rawBody.length();
+      buf[n++] = '}'; buf[n] = '\0';
+      sendOwned(buf);
+    }
+    // /presets.json: stream the file straight into the frame buffer (one copy in RAM).
+    void sendPresetsFile(uint32_t id) {
+      File f = WLED_FS.open("/presets.json", "r");
+      if (!f) { sendRawResponse(id, 200, F("{}")); return; }
+      size_t size = f.size();
+      if (size > CL_MAX_PRESETS) { f.close(); sendRawResponse(id, 507, F("{\"error\":\"presets.json too large\"}")); return; }
+      if (size == 0) { f.close(); sendRawResponse(id, 200, F("{}")); return; }
+      char* buf = (char*)d_malloc(size + 64);
+      if (!buf) { f.close(); sendRawResponse(id, 507, F("{\"error\":\"out of memory\"}")); return; }
+      size_t n = resHeader(buf, 64, id, 200);
+      size_t got = f.read((uint8_t*)buf + n, size);
+      f.close();
+      n += got; buf[n++] = '}'; buf[n] = '\0';
+      sendOwned(buf);
     }
 
-    // Same output as WLED's /json/live: every n-th LED as "RRGGBB" with brightness applied.
+    // Same output as WLED's /json/live (json.cpp serveLiveLeds): every n-th LED as "RRGGBB",
+    // brightness applied, matrix subsampling and w/h for 2D setups.
     String buildLiveLeds() {
-      const unsigned maxLeds = 512;
       unsigned used = strip.getLengthTotal();
-      unsigned n = used ? (used - 1) / maxLeds + 1 : 1;
+      unsigned n = used ? (used - 1) / CL_MAX_LIVE_LEDS + 1 : 1;
+      #ifndef WLED_DISABLE_2D
+      if (strip.isMatrix) {
+        used = Segment::maxWidth * Segment::maxHeight;
+        n = 1;
+        if (used > CL_MAX_LIVE_LEDS) n = 2;
+        if (used > CL_MAX_LIVE_LEDS * 4) n = 4;
+      }
+      #endif
       String out;
-      out.reserve(9 + 9 * (used / n + 1) + 16);
+      out.reserve(9 + 9 * (used / n + 1) + 32);
       out = F("{\"leds\":[");
       char hex[10];
       bool first = true;
       for (unsigned i = 0; i < used; i += n) {
+        #ifndef WLED_DISABLE_2D
+        if (strip.isMatrix && n > 1 && (i / Segment::maxWidth) % n) i += Segment::maxWidth * (n - 1);
+        if (i >= used) break;
+        #endif
         uint32_t c = strip.getPixelColor(i);
         uint8_t r = R(c), g = G(c), b = B(c), w = W(c);
         r = scale8(qadd8(w, r), strip.getBrightness());
@@ -253,6 +325,9 @@ class CloudLinkUsermod : public Usermod {
       }
       out += F("],\"n\":");
       out += n;
+      #ifndef WLED_DISABLE_2D
+      if (strip.isMatrix) { out += F(",\"w\":"); out += Segment::maxWidth / n; out += F(",\"h\":"); out += Segment::maxHeight / n; }
+      #endif
       out += '}';
       return out;
     }
@@ -279,6 +354,7 @@ class CloudLinkUsermod : public Usermod {
         if (body.isNull()) status = 400;
         else { deserializeState(body, CALL_MODE_DIRECT_CHANGE); target = Target::state; }
       } else if (pathOnly.startsWith("/win")) {
+        unloadPlaylist();   // the HTTP handler does this before handleSet(); with request == nullptr handleSet() skips it
         handleSet(nullptr, fullPath, true);
         target = Target::state;
       } else if (method == "GET" && pathOnly == "/presets.json") {
@@ -308,16 +384,7 @@ class CloudLinkUsermod : public Usermod {
 
       // bodies that are built outside ArduinoJson
       if (status == 200 && target == Target::live) { sendRawResponse(id, 200, buildLiveLeds()); return; }
-      if (status == 200 && target == Target::presets) {
-        File f = WLED_FS.open("/presets.json", "r");
-        if (!f) { sendRawResponse(id, 200, F("{}")); return; }
-        if (f.size() > 32768) { f.close(); sendRawResponse(id, 507, F("{\"error\":\"presets.json too large\"}")); return; }
-        String body = f.readString();
-        f.close();
-        if (!body.length()) body = F("{}");
-        sendRawResponse(id, 200, body);
-        return;
-      }
+      if (status == 200 && target == Target::presets) { sendPresetsFile(id); return; }
 
       pDoc->clear();
       JsonObject res = pDoc->to<JsonObject>();
@@ -365,9 +432,7 @@ class CloudLinkUsermod : public Usermod {
         res = pDoc->to<JsonObject>();
         res["type"] = "res"; res["id"] = id; res["status"] = 507; res["error"] = "response too large";
       }
-      String out;
-      serializeJson(*pDoc, out);
-      send(out);
+      sendDoc();
     }
 
     // returns false if the JSON buffer was busy and the frame must be retried
@@ -384,26 +449,27 @@ class CloudLinkUsermod : public Usermod {
         handleRelayRequest(root);
       } else if (!strcmp(type, "welcome")) {
         authenticated = true;
-        lastError = "";
+        setErr(CLE_NONE);
         DEBUG_PRINTLN(F("CloudLink: authenticated"));
         statePending = true; lastStateChange = 0;     // send a full state right away
       } else if (!strcmp(type, "paired")) {
         const char* id  = root["deviceId"] | "";
         const char* tok = root["token"] | "";
-        if (strlen(id) && strlen(tok)) {
-          lock();
+        if (strlen(id) && strlen(tok) && lock()) {
           deviceId = id; deviceToken = tok; pairCode = "";
           unlock();
           saveIdentity();
-          lastError = "";
+          setErr(CLE_NONE);
           DEBUG_PRINTLN(F("CloudLink: paired, reconnecting with device token"));
           reconnectRequested = true;
         }
       } else if (!strcmp(type, "error")) {
         const char* code = root["code"] | "unknown";
-        lastError = code;
+        int idx = 5;
+        for (int i = 0; i < 5; i++) if (!strcmp(code, serverErrors[i])) idx = i;
+        setErr(CLE_SERVER, idx);
         DEBUG_PRINTF_P(PSTR("CloudLink: server error %s\n"), code);
-        if (!strcmp(code, "bad_code") || !strcmp(code, "code_expired")) { lock(); pairCode = ""; unlock(); }
+        if (!strcmp(code, "bad_code") || !strcmp(code, "code_expired")) { if (lock()) { pairCode = ""; unlock(); } }
         if (!strcmp(code, "bad_token") || !strcmp(code, "revoked")) clearIdentity();
       } else if (!strcmp(type, "unpair")) {
         DEBUG_PRINTLN(F("CloudLink: unpaired by server"));
@@ -418,36 +484,34 @@ class CloudLinkUsermod : public Usermod {
     // ---------- the network task ----------
     bool wantConnection() {
       if (!enabled || !WLED_CONNECTED) return false;
-      lock();
+      if (!lock()) return false;
       bool want = host.length() && (hasToken() || pairCode.length());
       unlock();
       return want;
     }
 
-    void setError(const __FlashStringHelper* what, int err) {
-      lastErrno = err;
-      lastError = String(what);
-      if (err) { lastError += F(" (errno "); lastError += err; lastError += ')'; }
-      DEBUG_PRINTF_P(PSTR("CloudLink: %s\n"), lastError.c_str());
+    void setError(ErrCode code, int detail) {
+      setErr(code, detail);
+      DEBUG_PRINTF_P(PSTR("CloudLink: %s\n"), errorText().c_str());
     }
 
-    // one connection attempt + session; returns when the link drops
-    void runSession() {
+    // one connection attempt + session; returns the session length in ms (0 = never connected)
+    unsigned long runSession() {
       // snapshot config so settings changes on the main thread cannot race us
-      lock();
+      if (!lock()) return 0;
       String sHost = host, sPath = path, sToken = deviceToken, sCa = caOverride;
       uint16_t sPort = port;
       bool sTls = tls;
       unlock();
 
       esp_transport_handle_t base = sTls ? esp_transport_ssl_init() : esp_transport_tcp_init();
-      if (!base) { setError(F("transport init failed"), 0); return; }
+      if (!base) { setError(CLE_TRANSPORT_INIT, 0); return 0; }
       if (sTls) {
         const char* ca = sCa.length() ? sCa.c_str() : CLOUDLINK_DEFAULT_CA;
         esp_transport_ssl_set_cert_data(base, ca, strlen(ca));   // IDF adds the terminating NUL itself
       }
       esp_transport_handle_t ws = esp_transport_ws_init(base);
-      if (!ws) { esp_transport_destroy(base); setError(F("ws init failed"), 0); return; }
+      if (!ws) { esp_transport_destroy(base); setError(CLE_WS_INIT, 0); return 0; }
 
       String headers;
       if (sToken.length()) { headers = F("Authorization: Bearer "); headers += sToken; headers += F("\r\n"); }
@@ -461,12 +525,12 @@ class CloudLinkUsermod : public Usermod {
       DEBUG_PRINTF_P(PSTR("CloudLink: connecting %s://%s:%u%s\n"), sTls ? "wss" : "ws", sHost.c_str(), sPort, sPath.c_str());
       if (esp_transport_connect(ws, sHost.c_str(), sPort, CL_CONNECT_TIMEOUT_MS) < 0) {
         int st = esp_transport_ws_get_upgrade_request_status(ws);
-        if (st > 0) { lastErrno = st; lastError = F("handshake rejected, HTTP "); lastError += st; DEBUG_PRINTF_P(PSTR("CloudLink: %s\n"), lastError.c_str()); }
-        else setError(F("connect failed"), esp_transport_get_errno(ws));
+        if (st > 0) setError(CLE_HANDSHAKE, st);
+        else setError(CLE_CONNECT, esp_transport_get_errno(ws));
         esp_transport_close(ws);
         esp_transport_destroy(ws);
         esp_transport_destroy(base);
-        return;
+        return 0;
       }
 
       connected = true;
@@ -475,7 +539,7 @@ class CloudLinkUsermod : public Usermod {
       DEBUG_PRINTLN(F("CloudLink: connected"));
 
       char* msgBuf = nullptr;         // message being assembled (may span several frames)
-      size_t msgLen = 0;
+      size_t msgLen = 0, msgCap = 0;
       int frameRemaining = 0;         // payload bytes still to read for the current frame
       int zeroReads = 0;              // consecutive empty reads after poll said "readable"
       char chunk[CL_READ_CHUNK];
@@ -488,25 +552,31 @@ class CloudLinkUsermod : public Usermod {
         // ---- outbound ----
         char* out;
         while (xQueueReceive(txq, &out, 0) == pdTRUE) {
-          int w = esp_transport_ws_send_raw(ws, WS_TRANSPORT_OPCODES_TEXT, out, strlen(out), CL_WRITE_TIMEOUT_MS);
-          free(out);
-          if (w < 0) { setError(F("write failed"), esp_transport_get_errno(ws)); goto drop; }
+          int w = esp_transport_ws_send_raw(ws, WS_FIN(WS_TRANSPORT_OPCODES_TEXT), out, strlen(out), CL_WRITE_TIMEOUT_MS);
+          d_free(out);
+          if (w < 0) { setError(CLE_WRITE, esp_transport_get_errno(ws)); goto drop; }
         }
 
         // ---- inbound ----
         {
           int r = esp_transport_poll_read(ws, CL_READ_TIMEOUT_MS);
-          if (r < 0) { setError(F("socket error"), esp_transport_get_errno(ws)); goto drop; }
+          if (r < 0) { setError(CLE_SOCKET, esp_transport_get_errno(ws)); goto drop; }
           if (r > 0) {
             int n = esp_transport_read(ws, chunk, sizeof(chunk), CL_READ_TIMEOUT_MS);
-            if (n < 0) { setError(F("read failed"), esp_transport_get_errno(ws)); goto drop; }
-            if (n == 0) {   // readable but nothing delivered: timeout mid-frame, or the peer closed the socket
-              if (++zeroReads > 20) { setError(F("connection lost"), esp_transport_get_errno(ws)); goto drop; }
+            if (n < 0) { setError(CLE_READ, esp_transport_get_errno(ws)); goto drop; }
+            bool newFrame = (frameRemaining == 0);
+            if (n == 0 && !newFrame) {   // readable but nothing delivered mid-frame: timeout, or the peer vanished
+              if (++zeroReads > 20) { setError(CLE_LOST, esp_transport_get_errno(ws)); goto drop; }
+              continue;
+            }
+            int opcode = esp_transport_ws_get_read_opcode(ws) & 0x0F;
+            if (n == 0 && opcode == WS_TRANSPORT_OPCODES_NONE) {   // no frame at all
+              if (++zeroReads > 20) { setError(CLE_LOST, esp_transport_get_errno(ws)); goto drop; }
               continue;
             }
             zeroReads = 0;
-            int opcode = esp_transport_ws_get_read_opcode(ws) & 0x0F;
-            bool newFrame = (frameRemaining == 0);
+            // Zero-length frames (the server's empty PING/PONG/CLOSE) legitimately return n == 0
+            // with the opcode set; they must still be handled below.
             if (newFrame) frameRemaining = esp_transport_ws_get_read_payload_len(ws);   // reads may return a frame in pieces
             frameRemaining -= n;
             if (frameRemaining < 0) frameRemaining = 0;
@@ -514,10 +584,10 @@ class CloudLinkUsermod : public Usermod {
             bool fin = esp_transport_ws_get_fin_flag(ws);
             switch (opcode) {
               case WS_TRANSPORT_OPCODES_CLOSE:
-                setError(F("closed by server"), 0);
+                setError(CLE_CLOSED, 0);
                 goto drop;
               case WS_TRANSPORT_OPCODES_PING:
-                esp_transport_ws_send_raw(ws, WS_TRANSPORT_OPCODES_PONG, chunk, n, CL_WRITE_TIMEOUT_MS);
+                esp_transport_ws_send_raw(ws, WS_FIN(WS_TRANSPORT_OPCODES_PONG), chunk, n, CL_WRITE_TIMEOUT_MS);
                 break;
               case WS_TRANSPORT_OPCODES_PONG:
                 awaitingPong = false;
@@ -526,27 +596,30 @@ class CloudLinkUsermod : public Usermod {
               case WS_TRANSPORT_OPCODES_BINARY:
               case WS_TRANSPORT_OPCODES_CONT: {
                 if (newFrame && opcode != WS_TRANSPORT_OPCODES_CONT) {
-                  // first frame of a new message: start a buffer (a stray CONT without a start is ignored)
-                  if (msgBuf) { free(msgBuf); msgBuf = nullptr; }
-                  msgLen = 0;
-                  discardMsg = false;
-                  msgBuf = (char*)malloc(CL_MAX_MSG_LEN + 1);
-                  if (!msgBuf) discardMsg = true;
+                  // first frame of a new message: buffer sized from this frame's length (a stray CONT without a start is ignored)
+                  if (msgBuf) { d_free(msgBuf); msgBuf = nullptr; }
+                  msgLen = 0; msgCap = 0;
+                  int total = esp_transport_ws_get_read_payload_len(ws);
+                  discardMsg = (total < 0 || (size_t)total > CL_MAX_MSG_LEN);
+                  if (!discardMsg) { msgCap = total + 1; msgBuf = (char*)d_malloc(msgCap); if (!msgBuf) discardMsg = true; }
+                } else if (newFrame && !discardMsg && msgBuf) {
+                  // continuation frame of a fragmented message: grow the buffer
+                  int total = esp_transport_ws_get_read_payload_len(ws);
+                  if (total < 0 || msgLen + total > CL_MAX_MSG_LEN) discardMsg = true;
+                  else { char* g = (char*)d_realloc_malloc(msgBuf, msgLen + total + 1); if (g) { msgBuf = g; msgCap = msgLen + total + 1; } else discardMsg = true; }
                 }
                 if (!discardMsg && msgBuf) {
-                  if (msgLen + n > CL_MAX_MSG_LEN) discardMsg = true;   // too big for WLED's JSON buffer anyway
+                  if (msgLen + n + 1 > msgCap) discardMsg = true;
                   else { memcpy(msgBuf + msgLen, chunk, n); msgLen += n; }
                 }
                 if (frameDone && fin) {
-                  if (msgBuf && !discardMsg) {
+                  if (msgBuf && !discardMsg && msgLen) {
                     msgBuf[msgLen] = '\0';
-                    char* shrunk = (char*)realloc(msgBuf, msgLen + 1);
-                    if (shrunk) msgBuf = shrunk;
-                    if (xQueueSend(rxq, &msgBuf, pdMS_TO_TICKS(100)) != pdTRUE) free(msgBuf);
+                    if (xQueueSend(rxq, &msgBuf, pdMS_TO_TICKS(100)) != pdTRUE) d_free(msgBuf);
                   } else if (msgBuf) {
-                    free(msgBuf);
+                    d_free(msgBuf);
                   }
-                  msgBuf = nullptr; msgLen = 0; discardMsg = false;
+                  msgBuf = nullptr; msgLen = 0; msgCap = 0; discardMsg = false;
                 }
                 break;
               }
@@ -558,22 +631,23 @@ class CloudLinkUsermod : public Usermod {
         // ---- heartbeat ----
         unsigned long now = millis();
         if (now - lastPing > CL_PING_INTERVAL_MS) {
-          esp_transport_ws_send_raw(ws, WS_TRANSPORT_OPCODES_PING, "", 0, CL_WRITE_TIMEOUT_MS);
+          esp_transport_ws_send_raw(ws, WS_FIN(WS_TRANSPORT_OPCODES_PING), "", 0, CL_WRITE_TIMEOUT_MS);
           lastPing = now; pingSent = now; awaitingPong = true;
         }
-        if (awaitingPong && now - pingSent > CL_PONG_TIMEOUT_MS) { setError(F("pong timeout"), 0); goto drop; }
+        if (awaitingPong && now - pingSent > CL_PONG_TIMEOUT_MS) { setError(CLE_PONG, 0); goto drop; }
       }
 
     drop:
-      if (msgBuf) free(msgBuf);
+      if (msgBuf) d_free(msgBuf);
       connected = false;
       authenticated = false;
       lastDisconnectMs = millis();
-      { char* out; while (xQueueReceive(txq, &out, 0) == pdTRUE) free(out); }   // drop stale outbound frames
+      { char* out; while (xQueueReceive(txq, &out, 0) == pdTRUE) d_free(out); }   // drop stale outbound frames
       esp_transport_close(ws);
       esp_transport_destroy(ws);
       esp_transport_destroy(base);
       DEBUG_PRINTLN(F("CloudLink: disconnected"));
+      return lastDisconnectMs - lastConnectMs;
     }
 
     static void taskEntry(void* arg) {
@@ -582,9 +656,9 @@ class CloudLinkUsermod : public Usermod {
       for (;;) {
         if (!self->wantConnection()) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
         self->reconnectRequested = false;
-        self->runSession();
+        unsigned long sessionMs = self->runSession();   // 0 when the connect itself failed
         self->reconnects++;
-        if (self->lastConnectMs && self->lastDisconnectMs - self->lastConnectMs > CL_STABLE_SESSION_MS) backoff = CL_RECONNECT_MIN_MS;
+        if (sessionMs > CL_STABLE_SESSION_MS) backoff = CL_RECONNECT_MIN_MS;
         if (self->reconnectRequested) { self->reconnectRequested = false; vTaskDelay(pdMS_TO_TICKS(500)); continue; }   // config changed: retry quickly
         vTaskDelay(pdMS_TO_TICKS(backoff));
         backoff = min<unsigned long>(backoff * 2, CL_RECONNECT_MAX_MS);
@@ -624,7 +698,7 @@ class CloudLinkUsermod : public Usermod {
       doc["pairing"]   = pairCode.length() > 0;
       doc["connected"] = (bool)connected;
       doc["authed"]    = (bool)authenticated;
-      doc["error"]     = lastError;
+      doc["error"]     = errorText();
       doc["reconnects"]= reconnects;
       String out;
       serializeJson(doc, out);
@@ -636,11 +710,11 @@ class CloudLinkUsermod : public Usermod {
       String code = request->arg("code");
       code.trim();
       if (!validPairCode(code)) { sendJson(request, 400, F("{\"error\":\"pairing code: 4-32 letters, digits or dashes\"}")); return; }
-      lock();
-      if (request->hasArg("host")) { String h = request->arg("host"); h.trim(); if (h.length() && h.length() <= CL_MAX_HOST_LEN) host = h; }
-      if (request->hasArg("port")) { int p = request->arg("port").toInt(); if (p > 0 && p < 65536) port = p; }
-      if (request->hasArg("path")) { String p = request->arg("path"); if (p.startsWith("/")) path = p; }
-      if (request->hasArg("tls"))  { tls = request->arg("tls") != "false" && request->arg("tls") != "0"; }
+      applyConnectionSettings(request->hasArg("host") ? request->arg("host") : host,
+                              request->hasArg("port") ? request->arg("port").toInt() : port,
+                              request->hasArg("tls")  ? (request->arg("tls") != "false" && request->arg("tls") != "0") : tls,
+                              request->hasArg("path") ? request->arg("path") : path);
+      if (!lock()) { sendJson(request, 503, F("{\"error\":\"busy, retry\"}")); return; }
       pairCode = code;
       deviceId = ""; deviceToken = "";   // a new code replaces any previous registration
       bool haveHost = host.length() > 0;
@@ -649,14 +723,14 @@ class CloudLinkUsermod : public Usermod {
       WLED_FS.remove(CL_IDENTITY_FILE);
       enabled = true;
       configNeedsWrite = true;   // host/port/path/tls/enabled live in cfg.json; the code itself is never written
-      lastError = "";
+      setErr(CLE_NONE);
       reconnectRequested = true;
       sendJson(request, 200, F("{\"ok\":true,\"pairing\":true}"));
     }
 
     void handleUnpair(AsyncWebServerRequest* request) {
       clearIdentity();
-      lock(); pairCode = ""; unlock();
+      if (lock()) { pairCode = ""; unlock(); }
       reconnectRequested = true;
       sendJson(request, 200, F("{\"ok\":true,\"paired\":false}"));
     }
@@ -679,12 +753,12 @@ class CloudLinkUsermod : public Usermod {
       // inbound frames (retry a frame if the JSON buffer was busy)
       if (deferredMsg) {
         if (!handleMessage(deferredMsg)) return;
-        free(deferredMsg); deferredMsg = nullptr;
+        d_free(deferredMsg); deferredMsg = nullptr;
       }
       char* msg;
       while (rxq && xQueueReceive(rxq, &msg, 0) == pdTRUE) {
         if (!handleMessage(msg)) { deferredMsg = msg; break; }
-        free(msg);
+        d_free(msg);
       }
 
       if (connected && linkUpPending) { linkUpPending = false; sendHelloOrPair(); }
@@ -708,7 +782,7 @@ class CloudLinkUsermod : public Usermod {
       else if (authenticated)  a.add(F("connected"));
       else if (connected)      a.add(hasToken() ? F("authenticating") : F("pairing"));
       else if (!hasToken() && !pairCode.length()) a.add(F("not paired"));
-      else                     a.add(lastError.length() ? lastError : String(F("connecting")));
+      else                     { String e = errorText(); a.add(e.length() ? e : String(F("connecting"))); }
     }
 
     void addToConfig(JsonObject& root) override {
@@ -737,20 +811,12 @@ class CloudLinkUsermod : public Usermod {
       complete &= getJsonValue(top[F("path")], nPath, CL_DEFAULT_PATH);
       String code = top[F("pairCode")] | "";
       code.trim();
-      nHost.trim();
-      if (nPort <= 0 || nPort > 65535) nPort = CL_DEFAULT_PORT;
-      if (!nPath.startsWith("/")) nPath = CL_DEFAULT_PATH;
-      if (nHost.length() > CL_MAX_HOST_LEN) nHost = nHost.substring(0, CL_MAX_HOST_LEN);
-
-      bool changed = nHost != host || nPort != port || nTls != tls || nPath != path;
-      lock();
-      host = nHost; port = nPort; tls = nTls; path = nPath;
+      bool changed = applyConnectionSettings(nHost, nPort, nTls, nPath);
       if (code.length()) {
-        if (validPairCode(code)) { pairCode = code; deviceId = ""; deviceToken = ""; changed = true; }
-        else DEBUG_PRINTLN(F("CloudLink: ignored malformed pairing code"));
+        if (validPairCode(code)) {
+          if (lock()) { pairCode = code; deviceId = ""; deviceToken = ""; unlock(); WLED_FS.remove(CL_IDENTITY_FILE); changed = true; }
+        } else DEBUG_PRINTLN(F("CloudLink: ignored malformed pairing code"));
       }
-      unlock();
-      if (code.length() && pairCode == code) WLED_FS.remove(CL_IDENTITY_FILE);
       enabled = nEnabled;
       if (changed) reconnectRequested = true;
       return complete;
@@ -769,6 +835,7 @@ class CloudLinkUsermod : public Usermod {
 };
 
 const char CloudLinkUsermod::_name[]    PROGMEM = "CloudLink";
+const char* const CloudLinkUsermod::serverErrors[] = { "bad_code", "code_expired", "bad_token", "revoked", "unknown", "unknown" };
 const char CloudLinkUsermod::_enabled[] PROGMEM = "enabled";
 
 static CloudLinkUsermod cloudLinkUsermod;

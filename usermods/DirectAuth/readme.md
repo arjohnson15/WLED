@@ -39,7 +39,7 @@ Unauthenticated requests get `302 /login` when the request is a browser navigati
 
 | File | Contents |
 |---|---|
-| `/auth.json` | username, 16-byte random salt, PBKDF2-HMAC-SHA256 hash (10 000 rounds), iteration count |
+| `/auth.json` | username, 16-byte random salt, PBKDF2-HMAC-SHA256 hash (4096 rounds), iteration count |
 | `/auth_sess.json` | SHA-256 of each session token with created/expiry unix times |
 | `cfg.json` → `um.DirectAuth` | `enabled`, `sessionDays`, `allowAlexa` only. `newUser` / `newPassword` are write-only fields consumed when settings are saved and always stored back empty. |
 
@@ -67,5 +67,14 @@ handler registered first can read the `Cookie` header inside `canHandle()` and e
 claim the request (deny) or return `false` so the normal WLED handler runs. Usermod
 `setup()` runs before `initServer()`, which makes this handler first in the list without
 touching any core file — `git merge upstream/main` stays trivial.
+
+**Self-test.** Ten seconds after WiFi comes up the usermod sends itself an anonymous
+`GET /json/state` over loopback and expects a 401. If that ever fails (for example an
+upstream merge moved `initServer()` ahead of usermod setup), the Info page shows
+"GATE INACTIVE (self-test failed)" and the debug log says so. Check this after every
+upstream merge.
+
+CORS preflight (`OPTIONS`) requests pass through the gate, as they carry no credentials
+by design; WLED answers them with its usual wildcard CORS headers.
 
 Requires ESP32 (mbedtls PBKDF2/SHA-256, hardware RNG). ESP8266 builds fail on purpose.

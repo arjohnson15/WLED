@@ -47,7 +47,7 @@
 #define DA_TOKEN_HEX_LEN      (DA_TOKEN_BYTES * 2)
 #define DA_SALT_BYTES         16
 #define DA_HASH_BYTES         32
-#define DA_PBKDF2_ITERATIONS  10000
+#define DA_PBKDF2_ITERATIONS  4096   // ~60-100 ms on an ESP32; runs on the async_tcp task, so keep it short. Stored per credential file, so changing it does not break existing logins.
 #define DA_MAX_FAILS          5
 #define DA_LOCKOUT_MS         30000
 #define DA_MIN_VALID_TIME     1700000000UL  // toki below this means NTP has not synced yet
@@ -186,6 +186,11 @@ class DirectAuthUsermod : public Usermod {
     bool          locked    = false;
 
     DirectAuthGate* gate = nullptr;
+
+    // One-time loopback self-test: an anonymous GET /json/state must be refused. Guards the
+    // assumption that this handler was registered before WLED's own routes (see setup()).
+    int8_t        gateSelfTest   = -1;    // -1 not run, 0 failed, 1 passed, 2 could not run
+    unsigned long selfTestDueAt  = 0;
 
     static const char _name[];
     static const char _enabled[];
@@ -537,6 +542,7 @@ class DirectAuthUsermod : public Usermod {
     // true = deny this request (not public, and no valid session / setup not done)
     bool shouldBlock(AsyncWebServerRequest* request) {
       if (!enabled) return false;
+      if (request->method() == HTTP_OPTIONS) return false;   // CORS preflight carries no credentials by design; WLED answers it
       if (isPublicPath(request->url())) return false;
       loadCredentials();
       if (!hasCreds) return true;
@@ -580,7 +586,27 @@ class DirectAuthUsermod : public Usermod {
       DEBUG_PRINTF_P(PSTR("DirectAuth: %s, %s\n"), enabled ? "enabled" : "disabled", hasCreds ? "credentials present" : "SETUP REQUIRED");
     }
 
-    void loop() override {}
+    void loop() override {
+      if (gateSelfTest != -1 || !enabled) return;
+      if (!WLED_CONNECTED) { selfTestDueAt = 0; return; }
+      if (!selfTestDueAt) { selfTestDueAt = millis() + 10000; return; }   // give the server time to come up
+      if ((long)(millis() - selfTestDueAt) < 0) return;
+      runGateSelfTest();
+    }
+
+    void runGateSelfTest() {
+      WiFiClient c;
+      c.setTimeout(1500);
+      if (!c.connect(IPAddress(127, 0, 0, 1), 80)) { gateSelfTest = 2; DEBUG_PRINTLN(F("DirectAuth: self-test skipped (no loopback)")); return; }
+      c.print(F("GET /json/state HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"));
+      unsigned long t0 = millis();
+      while (!c.available() && millis() - t0 < 1500) delay(1);
+      String status = c.readStringUntil('\n');
+      c.stop();
+      gateSelfTest = status.indexOf(F(" 401 ")) > 0 ? 1 : 0;
+      if (gateSelfTest == 1) DEBUG_PRINTLN(F("DirectAuth: self-test passed, gate is active"));
+      else DEBUG_PRINTF_P(PSTR("DirectAuth: SELF-TEST FAILED, anonymous request got '%s' - gate is not first in the handler chain\n"), status.c_str());
+    }
 
     void addToJsonInfo(JsonObject& root) override {
       JsonObject user = root["u"];
@@ -588,6 +614,7 @@ class DirectAuthUsermod : public Usermod {
       JsonArray a = user.createNestedArray(F("Direct login"));
       if (!enabled)       a.add(F("disabled"));
       else if (!hasCreds) a.add(F("setup required"));
+      else if (gateSelfTest == 0) a.add(F("GATE INACTIVE (self-test failed)"));
       else { a.add(sessionCount()); a.add(F(" active sessions")); }
     }
 

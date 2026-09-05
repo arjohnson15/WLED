@@ -62,7 +62,7 @@ Controller → cloud:
 Relayed paths (matched loosely, like WLED's own `/json` handler, so the stock UI's
 URLs work unchanged): `GET /json`, `/json/state`, `/json/info`, `/json/si`,
 `/json/eff[ects]`, `/json/pal[ettes]`, `/json/palx?page=N`, `/json/nodes`,
-`/json/fxda[ta]`, `/json/live` (every n-th LED as `"RRGGBB"`, max 512, brightness
+`/json/fxda[ta]`, `/json/live` (every n-th LED as `"RRGGBB"`, max 256 like WLED, brightness
 applied, same shape as WLED's), `/presets.json` (raw file); `POST /json`,
 `/json/state`, `/json/si` (WLED state JSON, returns state); `GET /win&...` (WLED HTTP
 API, returns state). Responses larger than WLED's JSON buffer (24 KB on ESP32) return

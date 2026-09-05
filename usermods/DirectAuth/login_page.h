@@ -35,7 +35,7 @@ button:disabled{opacity:.5;cursor:default}
 </form></div>
 <script>
 var setup=false,to=new URLSearchParams(location.search).get('to')||'/';
-if(!/^\/(?!\/)/.test(to))to='/';
+if(!/^\/(?![\/\\])/.test(to))to='/';
 var $=function(i){return document.getElementById(i)};
 fetch('/auth/status',{cache:'no-store'}).then(function(r){return r.json()}).then(function(s){
  if(s.auth){location.replace(to);return}
