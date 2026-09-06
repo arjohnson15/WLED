@@ -165,6 +165,15 @@ class CloudLinkUsermod : public Usermod {
       deviceToken = doc["t"]  | "";
       String pend = normalisePairCode(doc["pend"] | "");   // code entered before the controller had WiFi
       if (pend.length() && !deviceToken.length()) pairCode = pend;
+      // A controller holding a cloud token but with the link switched off is a state no one can
+      // ask for: unpairing throws the token away. So it only happens when the configuration was
+      // damaged, and it is invisible from the cloud — the controller simply never calls again.
+      // Treat the token as the intent it was.
+      if (deviceToken.length() && !enabled) {
+        enabled = true;
+        configNeedsWrite = true;
+        DEBUG_PRINTLN(F("CloudLink: paired but disabled in config; re-enabling"));
+      }
     }
 
     // Stores the device identity and any still-unused pairing code. The code has to be on flash
@@ -1159,11 +1168,15 @@ class CloudLinkUsermod : public Usermod {
       int    nPort    = port;
       bool   nTls     = tls;
       String nPath    = path;
-      complete &= getJsonValue(top[FPSTR(_enabled)], nEnabled, false);
-      complete &= getJsonValue(top[F("host")], nHost, "");
-      complete &= getJsonValue(top[F("port")], nPort, CL_DEFAULT_PORT);
-      complete &= getJsonValue(top[F("tls")],  nTls, true);
-      complete &= getJsonValue(top[F("path")], nPath, CL_DEFAULT_PATH);
+      // Every default here is the value already in memory, never a fresh one: a config that
+      // arrives without our section's keys — a partial write, an older backup, a config file
+      // that failed to parse — must leave the link exactly as it was. Defaulting `enabled` to
+      // false took the controller off the cloud with nothing to show for it.
+      complete &= getJsonValue(top[FPSTR(_enabled)], nEnabled, enabled);
+      complete &= getJsonValue(top[F("host")], nHost, host);
+      complete &= getJsonValue(top[F("port")], nPort, port);
+      complete &= getJsonValue(top[F("tls")],  nTls, tls);
+      complete &= getJsonValue(top[F("path")], nPath, path);
       String code = normalisePairCode(top[F("pairCode")] | "");
       bool changed = applyConnectionSettings(nHost, nPort, nTls, nPath);
       if (code.length() && lock()) { pairCode = code; deviceId = ""; deviceToken = ""; unlock(); saveIdentity(); changed = true; }
