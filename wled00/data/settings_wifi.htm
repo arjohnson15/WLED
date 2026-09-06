@@ -158,7 +158,7 @@ Static subnet mask:<br>
 			clInit();
 		}
 
-		// ---- JTS Lights cloud link (CloudLink usermod: GET /cloud/status, POST /cloud/pair) ----
+		// ---- JTS-CLOUD-JS-START: cloud link (CloudLink usermod: GET /cloud/status, POST /cloud/pair) ----
 		function clInit() {
 			fetch(getURL('/cloud/status'), {cache:'no-store'}).then(r=>r.json()).then(s=>{
 				if (s.host) gId('clh').value = s.host;
@@ -186,6 +186,7 @@ Static subnet mask:<br>
 			clSend().then(()=>{ clDone = true; d.Sf.submit(); });
 			return false;
 		}
+		// ---- JTS-CLOUD-JS-END ----
 
 		var rC = 0; // remote count
 		// toggle visibility of ESP-NOW remote list based on checkbox state
@@ -252,6 +253,7 @@ Static subnet mask:<br>
 			<button type="button" id="wifi_rem" onclick="remWiFi()">-</button><br>
 		</div>
 	</div>
+	<!-- JTS-CLOUD-SECTION-START (see tools/jts-check-patches.sh) -->
 	<div class="sec">
 		<h3>JTS Lights cloud</h3>
 		<span id="clst" class="mut">Not linked.</span><br><br>
@@ -262,6 +264,7 @@ Static subnet mask:<br>
 		<span id="clmsg"></span><br>
 		<i>The code is used once the controller is on your WiFi, so you can enter it here during setup.</i>
 	</div>
+	<!-- JTS-CLOUD-SECTION-END -->
 	<div class="sec" id="ethd">
 		<h3>Ethernet Type</h3>
 		<select name="ETH">

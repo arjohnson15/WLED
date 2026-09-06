@@ -45,6 +45,10 @@ jobs:
           if git merge --no-edit upstream/main; then
             AFTER=$(git rev-parse HEAD)
             if [ "$BEFORE" = "$AFTER" ]; then echo "already up to date"; echo "merged=false" >> $GITHUB_OUTPUT; exit 0; fi
+            if ! ./tools/jts-check-patches.sh; then
+              echo "::error::the merge dropped one of this fork's changes - not pushing"
+              git reset --hard "$BEFORE"; exit 1
+            fi
             git push origin main
             echo "merged=true" >> $GITHUB_OUTPUT
           else
@@ -71,6 +75,8 @@ jobs:
           path: ~/.platformio
           key: pio-${{ hashFiles('platformio.ini', 'platformio_override.ini') }}
           restore-keys: pio-
+      - name: Check this fork's changes survived any merge
+        run: ./tools/jts-check-patches.sh
       - name: Install tooling
         run: |
           pip install --quiet platformio
