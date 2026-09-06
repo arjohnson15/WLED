@@ -33,6 +33,8 @@ check "cloud section markup end"  wled00/data/settings_wifi.htm        "JTS-CLOU
 check "cloud section script"      wled00/data/settings_wifi.htm        "JTS-CLOUD-JS-START"
 check "cloud section script end"  wled00/data/settings_wifi.htm        "JTS-CLOUD-JS-END"
 check "submit hook wired"         wled00/data/settings_wifi.htm        "clOnSubmit"
+check "cloud update on update page" wled00/data/update.htm             "JTS-CLOUD-UPDATE-START"
+check "cloud update markup end"   wled00/data/update.htm               "JTS-CLOUD-UPDATE-END"
 
 if [ $fail -ne 0 ]; then
   echo

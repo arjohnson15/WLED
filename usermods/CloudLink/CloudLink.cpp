@@ -63,7 +63,7 @@ void serializeNodes(JsonObject root);
 #define CL_MAX_LIVE_LEDS       256                // same as MAX_LIVE_LEDS in json.cpp (file-local there)
 #define CL_OTA_STALL_MS        30000              // no OTA data for this long -> abort and reconnect
 #define CL_OTA_REPORT_BYTES    65536              // progress frame every 64 KB
-#define CL_HTTP_CHUNK          6144               // raw bytes per passthrough frame (~8 KB once base64'd)
+#define CL_HTTP_CHUNK          1460               // one TCP segment per passthrough frame; larger reads starve lwIP's 8 loopback pbufs and the page never arrives
 #define CL_HTTP_MAX            262144             // refuse to relay a response larger than this
 #define CL_HTTP_TIMEOUT_MS     8000
 #define CL_READ_CHUNK          1024
@@ -639,17 +639,24 @@ class CloudLinkUsermod : public Usermod {
       c.print(req);
       if (body.length()) c.print(body);
 
-      uint8_t  raw[CL_HTTP_CHUNK];
+      uint8_t* raw = (uint8_t*)d_malloc(CL_HTTP_CHUNK);          // off the task stack: it is only 12 KB
       char*    b64 = (char*)d_malloc(CL_HTTP_CHUNK * 4 / 3 + 8);
-      if (!b64) { c.stop(); httpFail(id, F("out of memory")); return; }
+      if (!raw || !b64) { d_free(raw); d_free(b64); c.stop(); httpFail(id, F("out of memory")); return; }
       size_t   total = 0;
       unsigned seq = 0;
+      bool     gotAny = false;
       unsigned long deadline = millis() + CL_HTTP_TIMEOUT_MS;
 
-      while ((c.connected() || c.available()) && millis() < deadline) {
-        if (!c.available()) { delay(2); continue; }
-        int n = c.read(raw, sizeof(raw));
-        if (n <= 0) continue;
+      // Keep going while there is data or the peer is still up; only give up on a real timeout,
+      // because connected() can read false while bytes are still buffered.
+      while (millis() < deadline) {
+        int n = c.available() ? c.read(raw, CL_HTTP_CHUNK) : 0;
+        if (n <= 0) {
+          if (gotAny && !c.connected() && !c.available()) break;   // response complete
+          delay(2);
+          continue;
+        }
+        gotAny = true;
         deadline = millis() + CL_HTTP_TIMEOUT_MS;
         total += n;
         if (total > CL_HTTP_MAX) { httpFail(id, F("response too large")); break; }
@@ -663,15 +670,21 @@ class CloudLinkUsermod : public Usermod {
         frame += String(b64, outLen);
         frame += F("\"}");
         send(frame);
+        // let the queue drain so a big page cannot outrun the socket or exhaust the heap
+        while (txq && uxQueueMessagesWaiting(txq) >= CL_TX_QUEUE_LEN - 1) delay(2);
       }
+      if (!gotAny) httpFail(id, F("no response from the local web server"));
+      d_free(raw);
       d_free(b64);
       c.stop();
-      String done = F("{\"type\":\"hres\",\"id\":");
-      done += id;
-      done += F(",\"seq\":");
-      done += seq;
-      done += F(",\"more\":false}");
-      send(done);
+      if (gotAny) {
+        String done = F("{\"type\":\"hres\",\"id\":");
+        done += id;
+        done += F(",\"seq\":");
+        done += seq;
+        done += F(",\"more\":false}");
+        send(done);
+      }
     }
 
     void httpFail(uint32_t id, const __FlashStringHelper* why) {
@@ -966,6 +979,11 @@ class CloudLinkUsermod : public Usermod {
       server.on("/cloud/status", HTTP_GET,  [this](AsyncWebServerRequest* r) { handleStatus(r); });
       server.on("/cloud/pair",   HTTP_POST, [this](AsyncWebServerRequest* r) { handlePair(r); });
       server.on("/cloud/unpair", HTTP_POST, [this](AsyncWebServerRequest* r) { handleUnpair(r); });
+      server.on("/cloud/update", HTTP_POST, [this](AsyncWebServerRequest* r) {
+        if (!connected || !authenticated) { sendJson(r, 503, F("{\"error\":\"not connected to the cloud\"}")); return; }
+        send(F("{\"type\":\"ota_request\"}"));   // the cloud answers with ota_begin if a newer build exists
+        sendJson(r, 200, F("{\"ok\":true,\"requested\":true}"));
+      });
       if (enabled) startTask();
       DEBUG_PRINTF_P(PSTR("CloudLink: %s, %s\n"), enabled ? "enabled" : "disabled", hasToken() ? "paired" : "not paired");
     }
