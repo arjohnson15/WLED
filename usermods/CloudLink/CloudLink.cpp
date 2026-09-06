@@ -98,6 +98,10 @@ class CloudLinkUsermod : public Usermod {
 
     // ---- task plumbing ----
     TaskHandle_t      task   = nullptr;
+    // Set for the life of a session. Frames built while the session loop is busy (the HTTP
+    // passthrough, OTA replies) are written straight to the socket: the outbound queue is only
+    // drained at the top of that loop, so queuing from inside it silently dropped frames.
+    esp_transport_handle_t activeWs = nullptr;
     QueueHandle_t     rxq    = nullptr;   // char* frames from cloud, freed by main loop
     QueueHandle_t     txq    = nullptr;   // char* frames to cloud, freed by task
     SemaphoreHandle_t cfgMtx = nullptr;   // guards host/port/path/token/pairCode/caOverride
@@ -233,6 +237,13 @@ class CloudLinkUsermod : public Usermod {
       memcpy(copy, frame.c_str(), frame.length() + 1);
       sendOwned(copy);
     }
+    // Writes a frame to the socket immediately. Only safe from the network task.
+    bool sendNow(const char* text, size_t len) {
+      if (!activeWs) return false;
+      return esp_transport_ws_send_raw(activeWs, WS_FIN(WS_TRANSPORT_OPCODES_TEXT), text, len, CL_WRITE_TIMEOUT_MS) >= 0;
+    }
+    bool sendNow(const String& text) { return sendNow(text.c_str(), text.length()); }
+
     // Serialises pDoc straight into one right-sized buffer and queues it.
     void sendDoc() {
       size_t len = measureJson(*pDoc);
@@ -546,7 +557,7 @@ class CloudLinkUsermod : public Usermod {
       if (err.length()) { out += F(",\"error\":\""); out += err; out += '"'; }
       else { out += F(",\"written\":"); out += otaWritten; out += F(",\"size\":"); out += otaSize; }
       out += '}';
-      send(out);
+      if (!sendNow(out)) send(out);   // fall back to the queue if there is no live session
     }
 
     void otaAbort(const String& why) {
@@ -669,9 +680,7 @@ class CloudLinkUsermod : public Usermod {
         frame += F(",\"more\":true,\"b64\":\"");
         frame += String(b64, outLen);
         frame += F("\"}");
-        send(frame);
-        // let the queue drain so a big page cannot outrun the socket or exhaust the heap
-        while (txq && uxQueueMessagesWaiting(txq) >= CL_TX_QUEUE_LEN - 1) delay(2);
+        if (!sendNow(frame)) { setError(CLE_WRITE, 0); break; }
       }
       if (!gotAny) httpFail(id, F("no response from the local web server"));
       d_free(raw);
@@ -683,7 +692,7 @@ class CloudLinkUsermod : public Usermod {
         done += F(",\"seq\":");
         done += seq;
         done += F(",\"more\":false}");
-        send(done);
+        sendNow(done);
       }
     }
 
@@ -693,7 +702,7 @@ class CloudLinkUsermod : public Usermod {
       f += F(",\"more\":false,\"error\":\"");
       f += why;
       f += F("\"}");
-      send(f);
+      sendNow(f);
     }
 
     // Returns true when the frame was an OTA control frame and has been handled here.
@@ -762,6 +771,7 @@ class CloudLinkUsermod : public Usermod {
         return 0;
       }
 
+      activeWs = ws;
       connected = true;
       linkUpPending = true;
       lastConnectMs = millis();
@@ -874,6 +884,7 @@ class CloudLinkUsermod : public Usermod {
 
     drop:
       if (otaActive) otaAbort(F("link lost"));
+      activeWs = nullptr;
       if (msgBuf) d_free(msgBuf);
       connected = false;
       authenticated = false;
