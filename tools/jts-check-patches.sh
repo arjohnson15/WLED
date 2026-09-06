@@ -35,6 +35,9 @@ check "cloud section script end"  wled00/data/settings_wifi.htm        "JTS-CLOU
 check "submit hook wired"         wled00/data/settings_wifi.htm        "clOnSubmit"
 check "cloud update on update page" wled00/data/update.htm             "JTS-CLOUD-UPDATE-START"
 check "cloud update markup end"   wled00/data/update.htm               "JTS-CLOUD-UPDATE-END"
+check "board picker on LED page"  wled00/data/settings_leds.htm        "JTS-BOARD-PICKER-START"
+check "board picker script"       wled00/data/settings_leds.htm        "JTS-BOARD-JS-START"
+check "board picker is called"    wled00/data/settings_leds.htm        "jtsFillBoards()"
 
 if [ $fail -ne 0 ]; then
   echo
