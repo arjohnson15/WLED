@@ -74,6 +74,8 @@ void serializeNodes(JsonObject root);
 #define CL_RX_WAIT_MS          1000  // how long an inbound frame waits for the main loop to catch up
 #define CL_DEFER_MAX_MS        5000  // give up retrying a frame that cannot get the JSON buffer
 #define CL_CFG_RESTART_DELAY_MS 1200 // let the answer reach the cloud before restarting into new LED config
+#define CL_CFG_PATCH_TRIES     40    // JSON buffer retries before a config patch is given up on
+#define CL_CFG_PATCH_MAX       12288 // ceiling for the parsed patch document
 #define CL_WRITE_TIMEOUT_MS    5000
 #define CL_PING_INTERVAL_MS    20000
 #define CL_PONG_TIMEOUT_MS     10000
@@ -381,6 +383,46 @@ class CloudLinkUsermod : public Usermod {
       return out;
     }
 
+    // Deep-merges src into dst: objects merge key by key, arrays and scalars replace outright
+    // (an LED output list is meaningful only as a whole).
+    static void jsonMerge(JsonVariant dst, JsonVariantConst src) {
+      if (!src.is<JsonObjectConst>()) return;
+      for (JsonPairConst kv : src.as<JsonObjectConst>()) {
+        if (kv.value().is<JsonObjectConst>() && dst[kv.key()].is<JsonObject>()) jsonMerge(dst[kv.key()], kv.value());
+        else dst[kv.key()] = kv.value();
+      }
+    }
+
+    // Merges the pending change into cfg.json on flash. 1 = written, 0 = buffer busy, try again,
+    // -1 = failed. Written through a temporary file so a power cut cannot leave half a config.
+    int writeCfgPatch() {
+      JSONBufferGuard guard(JSON_LOCK_UNKNOWN);
+      if (!guard) return 0;
+
+      size_t len = strlen(cfgPatch);
+      DynamicJsonDocument patch(len * 3 + 1024 > CL_CFG_PATCH_MAX ? CL_CFG_PATCH_MAX : len * 3 + 1024);
+      if (deserializeJson(patch, cfgPatch)) return -1;
+
+      File f = WLED_FS.open(F("/cfg.json"), "r");
+      if (!f) return -1;
+      pDoc->clear();
+      DeserializationError err = deserializeJson(*pDoc, f);
+      f.close();
+      if (err) return -1;
+
+      jsonMerge(pDoc->as<JsonVariant>(), patch.as<JsonVariantConst>());
+      if (pDoc->overflowed()) return -1;
+
+      File w = WLED_FS.open(F("/cfg.tmp"), "w");
+      if (!w) return -1;
+      size_t written = serializeJson(*pDoc, w);
+      w.close();
+      if (!written) { WLED_FS.remove(F("/cfg.tmp")); return -1; }
+      WLED_FS.remove(F("/cfg.json"));
+      WLED_FS.rename(F("/cfg.tmp"), F("/cfg.json"));
+      return 1;
+    }
+
     // Executes one relayed API request. `root` is the parsed frame living in pDoc;
     // the response is built in pDoc afterwards, so everything needed is copied first.
     void handleRelayRequest(JsonObject root) {
@@ -403,17 +445,28 @@ class CloudLinkUsermod : public Usermod {
         JsonObject body = root["body"];
         if (body.isNull()) status = 400;
         else {
-          deserializeConfig(body);
-          if (doInitBusses) {
-            // Rebuilding the LED outputs in place wedges the main loop — and that is the loop
-            // which answers us, so the controller goes deaf to the cloud while still serving its
-            // own web page. Worse, the configuration is only written to flash *after* that
-            // rebuild, so the change is lost with it. Write it now instead and restart into it:
-            // creating the buses at boot is the path that is known to work.
-            doInitBusses = false;
-            cfgRestartAt = millis() + CL_CFG_RESTART_DELAY_MS;   // let this answer go out first
-            restarting = true;
+          // A change to the LED outputs cannot be applied in place. deserializeConfig() only
+          // stages the new buses in busConfigs; strip.finalizeInit() is what makes them live,
+          // and that rebuild wedges the main loop — the same loop that answers the cloud, which
+          // is why the controller goes deaf until it is power-cycled. Skipping the rebuild is no
+          // better, because serializeConfig() writes the buses out of the *live* BusManager, so
+          // the file would be saved with the outputs it is still running.
+          // So: patch the change into cfg.json and restart into it. Creating buses at boot is
+          // the one path that works.
+          JsonVariant ins = body["hw"]["led"]["ins"];
+          if (!ins.isNull()) {
+            size_t n = measureJson(body);
+            char* p = (char*)d_malloc(n + 1);
+            if (!p) status = 507;
+            else {
+              serializeJson(body, p, n + 1);
+              if (cfgPatch) d_free(cfgPatch);
+              cfgPatch = p; cfgPatchTries = 0;
+              cfgPatchAt = millis() + CL_CFG_RESTART_DELAY_MS;   // let this answer go out first
+              restarting = true;
+            }
           } else {
+            deserializeConfig(body);
             configNeedsWrite = true;
           }
           target = Target::none;
@@ -569,7 +622,9 @@ class CloudLinkUsermod : public Usermod {
     size_t        otaReported = 0;
     unsigned long otaLastData = 0;
     volatile unsigned long otaRebootAt = 0;
-    volatile unsigned long cfgRestartAt = 0;   // set when an LED config change needs a restart
+    char*    cfgPatch     = nullptr;   // pending config change, merged into cfg.json then booted into
+    unsigned long cfgPatchAt = 0;
+    uint8_t  cfgPatchTries = 0;
 
     // Minimal readers for the small, server-generated OTA frames (no pDoc lock in this task).
     static bool jsonHas(const char* msg, const char* key) { return strstr(msg, key) != nullptr; }
@@ -1147,10 +1202,15 @@ class CloudLinkUsermod : public Usermod {
 
       if (otaRebootAt && (long)(millis() - otaRebootAt) >= 0) { otaRebootAt = 0; doReboot = true; }
 
-      if (cfgRestartAt && (long)(millis() - cfgRestartAt) >= 0) {
-        cfgRestartAt = 0;
-        serializeConfigToFS();   // needs the JSON buffer, so never from inside handleMessage()
-        doReboot = true;
+      if (cfgPatch && cfgPatchAt && (long)(millis() - cfgPatchAt) >= 0) {
+        int r = writeCfgPatch();                      // needs the JSON buffer: only from here
+        if (r == 0 && ++cfgPatchTries < CL_CFG_PATCH_TRIES) cfgPatchAt = millis() + 100;
+        else {
+          cfgPatchAt = 0;
+          d_free(cfgPatch); cfgPatch = nullptr;
+          if (r > 0) doReboot = true;                 // boot into the change; buses are built there
+          else DEBUG_PRINTLN(F("CloudLink: config patch failed, nothing written"));
+        }
       }
 
       if (statePending && connected && authenticated && millis() - lastStateChange > CL_STATE_DEBOUNCE_MS) {
