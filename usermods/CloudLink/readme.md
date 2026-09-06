@@ -55,7 +55,7 @@ Controller → cloud:
 
 | Frame | Meaning |
 |---|---|
-| `{"type":"res","id":123,"status":200,"body":{...}}` | reply; `status` 400/404/405/507 carry `"error"` instead of `body` |
+| `{"type":"res","id":123,"status":200,"body":{...}}` | reply; `status` 400/404/405/413/503/507 carry `"error"` instead of `body` |
 | `{"type":"state","body":{...}}` | pushed after every state change (debounced 300 ms) and once after `welcome` |
 | `{"type":"pong"}` | reply to app-level ping |
 
@@ -67,6 +67,13 @@ applied, same shape as WLED's), `/presets.json` (raw file); `POST /json`,
 `/json/state`, `/json/si` (WLED state JSON, returns state); `GET /win&...` (WLED HTTP
 API, returns state). Responses larger than WLED's JSON buffer (24 KB on ESP32) return
 status 507; `presets.json` is capped at 32 KB.
+
+**Every `req` gets a `res`.** A request the controller cannot even process still gets one:
+`400` unreadable, `413` larger than the JSON buffer, `503` out of memory or the main loop too
+busy to take it. Silence is the one answer that is never correct — the cloud can only turn it
+into an unexplained 504 several seconds later, which is what a lost frame used to look like.
+Because these are produced before the frame is parsed, the id is scanned out of the raw text:
+the cloud always writes `type` and `id` ahead of `body`.
 
 The controller sends a WebSocket PING every 20 s and drops the link if no PONG arrives
 within 10 s. Reconnects back off from 5 s to 2 min; a link that lasted over a minute

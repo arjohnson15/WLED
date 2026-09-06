@@ -56,8 +56,8 @@ void serializeNodes(JsonObject root);
 #define CL_DEFAULT_PATH        "/device/ws"
 #define CL_TASK_STACK          12288
 #define CL_TASK_PRIO           1
-#define CL_RX_QUEUE_LEN        4
-#define CL_TX_QUEUE_LEN        8
+#define CL_RX_QUEUE_LEN        8
+#define CL_TX_QUEUE_LEN        12
 #define CL_MAX_MSG_LEN         JSON_BUFFER_SIZE   // frames bigger than WLED's JSON buffer are dropped
 #define CL_MAX_PRESETS         32768              // presets.json larger than this answers 507
 #define CL_MAX_LIVE_LEDS       256                // same as MAX_LIVE_LEDS in json.cpp (file-local there)
@@ -66,9 +66,13 @@ void serializeNodes(JsonObject root);
 #define CL_HTTP_CHUNK          1460               // one TCP segment per passthrough frame; larger reads starve lwIP's 8 loopback pbufs and the page never arrives
 #define CL_HTTP_MAX            262144             // refuse to relay a response larger than this
 #define CL_HTTP_TIMEOUT_MS     8000
+#define CL_LIVE_HOLD_MS        2500               // how long a pushed frame stays before WLED resumes its own effects
 #define CL_READ_CHUNK          1024
 #define CL_CONNECT_TIMEOUT_MS  10000
 #define CL_READ_TIMEOUT_MS     200
+#define CL_SEND_WAIT_MS        400   // how long a queued outbound frame waits for a free slot
+#define CL_RX_WAIT_MS          1000  // how long an inbound frame waits for the main loop to catch up
+#define CL_DEFER_MAX_MS        5000  // give up retrying a frame that cannot get the JSON buffer
 #define CL_WRITE_TIMEOUT_MS    5000
 #define CL_PING_INTERVAL_MS    20000
 #define CL_PONG_TIMEOUT_MS     10000
@@ -123,6 +127,7 @@ class CloudLinkUsermod : public Usermod {
     bool          statePending    = false;
     unsigned long lastStateChange = 0;
     char*         deferredMsg     = nullptr;    // inbound frame waiting for the JSON buffer lock
+    unsigned long deferredSince   = 0;          // when it started waiting
 
     static const char _name[];
     static const char _enabled[];
@@ -228,7 +233,10 @@ class CloudLinkUsermod : public Usermod {
     // Queues a NUL-terminated frame allocated with d_malloc(); takes ownership.
     void sendOwned(char* frame) {
       if (!frame) return;
-      if (!connected || !txq || xQueueSend(txq, &frame, 0) != pdTRUE) { d_free(frame); setErr(CLE_QUEUE_FULL); }
+      // Wait a moment for a slot: the network task drains the queue once per read cycle
+      // (CL_READ_TIMEOUT_MS), so a burst can fill it briefly. Dropping instead would lose a
+      // relay response, which the cloud can only report as an unexplained timeout.
+      if (!connected || !txq || xQueueSend(txq, &frame, pdMS_TO_TICKS(CL_SEND_WAIT_MS)) != pdTRUE) { d_free(frame); setErr(CLE_QUEUE_FULL); }
     }
     void send(const String& frame) {
       if (!connected || !txq) return;
@@ -478,7 +486,12 @@ class CloudLinkUsermod : public Usermod {
       if (!guard) return false;
       pDoc->clear();
       DeserializationError err = deserializeJson(*pDoc, msg);
-      if (err) { DEBUG_PRINTF_P(PSTR("CloudLink: bad frame (%s)\n"), err.c_str()); return true; }
+      if (err) {
+        DEBUG_PRINTF_P(PSTR("CloudLink: bad frame (%s)\n"), err.c_str());
+        char e[128];
+        if (reqErrorFrame(msg, 400, "unreadable request", e, sizeof(e))) send(e);
+        return true;
+      }
       JsonObject root = pDoc->as<JsonObject>();
       const char* type = root["type"] | "";
 
@@ -531,6 +544,19 @@ class CloudLinkUsermod : public Usermod {
 
     // Minimal readers for the small, server-generated OTA frames (no pDoc lock in this task).
     static bool jsonHas(const char* msg, const char* key) { return strstr(msg, key) != nullptr; }
+    // Formats a response for a relayed request that cannot be processed at all (unparseable,
+    // too large, no room in the queue). Without one the cloud has nothing to resolve its
+    // pending call against and can only report an unexplained 504 several seconds later.
+    // `msg` may be just the head of the frame: the server always writes "type" and "id"
+    // before the body.
+    static bool reqErrorFrame(const char* msg, int status, const char* why, char* out, size_t outLen) {
+      if (!strstr(msg, "\"req\"")) return false;     // only correlated relay requests carry an id
+      unsigned long id = (unsigned long)jsonNum(msg, "\"id\"");
+      if (!id) return false;
+      snprintf(out, outLen, "{\"type\":\"res\",\"id\":%lu,\"status\":%d,\"error\":\"%s\"}", id, status, why);
+      return true;
+    }
+
     static size_t jsonNum(const char* msg, const char* key) {
       const char* p = strstr(msg, key);
       if (!p) return 0;
@@ -618,6 +644,49 @@ class CloudLinkUsermod : public Usermod {
       otaWritten += len;
       if (otaWritten - otaReported >= CL_OTA_REPORT_BYTES) { otaReported = otaWritten; otaReply(F("ota_progress")); }
       if (otaWritten >= otaSize) otaFinish();
+    }
+
+    // ---------- pixel streaming ----------
+    // The cloud can push finished frames — a scaled GIF or photo for a light curtain, or
+    // anything else it wants to draw. Frames go through WLED's realtime path, the same one
+    // E1.31 and DDP use, so effects resume by themselves once the stream stops.
+    bool     liveActive = false;
+    uint16_t liveCount = 0;      // pixels expected in a frame
+    uint16_t liveGot = 0;        // pixels written so far in the current frame
+    uint8_t  livePartial[3];     // bytes of a pixel split across two reads
+    uint8_t  livePartialLen = 0;
+
+    void livePixelsBegin(const char* msg) {
+      size_t n = jsonNum(msg, "\"n\"");
+      if (!n || n > 8192) { liveActive = false; return; }
+      liveCount = n; liveGot = 0; livePartialLen = 0;
+      liveActive = true;
+      DEBUG_PRINTF_P(PSTR("CloudLink: pixel stream started, %u pixels\n"), (unsigned)n);
+    }
+
+    void livePixelsEnd() {
+      if (!liveActive) return;
+      liveActive = false;
+      realtimeTimeout = millis();   // let WLED fall back to its own effects immediately
+      DEBUG_PRINTLN(F("CloudLink: pixel stream stopped"));
+    }
+
+    // Raw RGB, three bytes per pixel, in order. Reads may split a pixel, so carry the remainder.
+    void livePixelData(const uint8_t* data, size_t len) {
+      if (!liveActive) return;
+      realtimeLock(CL_LIVE_HOLD_MS, REALTIME_MODE_GENERIC);
+      if (realtimeOverride) return;
+      size_t i = 0;
+      while (i < len) {
+        while (livePartialLen < 3 && i < len) livePartial[livePartialLen++] = data[i++];
+        if (livePartialLen < 3) break;
+        if (liveGot < liveCount) setRealtimePixel(liveGot, livePartial[0], livePartial[1], livePartial[2], 0);
+        liveGot++; livePartialLen = 0;
+        if (liveGot >= liveCount) {   // frame complete
+          strip.show();
+          liveGot = 0;
+        }
+      }
     }
 
     // ---------- HTTP passthrough ----------
@@ -717,6 +786,12 @@ class CloudLinkUsermod : public Usermod {
       if (!strstr(msg, "\"type\":\"hreq\"")) return false;
       httpPassthrough(msg);
       return true;
+    }
+
+    bool liveFrame(const char* msg) {
+      if (strstr(msg, "\"type\":\"px_begin\"")) { livePixelsBegin(msg); return true; }
+      if (strstr(msg, "\"type\":\"px_end\"")) { livePixelsEnd(); return true; }
+      return false;
     }
 
     // ---------- the network task ----------
@@ -833,17 +908,27 @@ class CloudLinkUsermod : public Usermod {
                 break;
               case WS_TRANSPORT_OPCODES_BINARY:
                 if (otaActive) { otaData((const uint8_t*)chunk, n); break; }   // firmware payload
-                // fall through: a binary frame outside an update is treated as text
+                if (liveActive) { livePixelData((const uint8_t*)chunk, n); break; }   // pixels for the strip
+                // fall through: a binary frame outside those is treated as text
               case WS_TRANSPORT_OPCODES_TEXT:
               case WS_TRANSPORT_OPCODES_CONT: {
                 if (otaActive && opcode == WS_TRANSPORT_OPCODES_CONT) { otaData((const uint8_t*)chunk, n); break; }
+                if (liveActive && opcode == WS_TRANSPORT_OPCODES_CONT) { livePixelData((const uint8_t*)chunk, n); break; }
                 if (newFrame && opcode != WS_TRANSPORT_OPCODES_CONT) {
                   // first frame of a new message: buffer sized from this frame's length (a stray CONT without a start is ignored)
                   if (msgBuf) { d_free(msgBuf); msgBuf = nullptr; }
                   msgLen = 0; msgCap = 0;
                   int total = esp_transport_ws_get_read_payload_len(ws);
                   discardMsg = (total < 0 || (size_t)total > CL_MAX_MSG_LEN);
+                  bool tooBig = discardMsg;
                   if (!discardMsg) { msgCap = total + 1; msgBuf = (char*)d_malloc(msgCap); if (!msgBuf) discardMsg = true; }
+                  if (discardMsg) {
+                    // tell the caller now; the payload itself is read and thrown away below
+                    char head[192], e[128];
+                    size_t hn = (size_t)n < sizeof(head) - 1 ? (size_t)n : sizeof(head) - 1;
+                    memcpy(head, chunk, hn); head[hn] = '\0';
+                    if (reqErrorFrame(head, tooBig ? 413 : 507, tooBig ? "request too large" : "out of memory", e, sizeof(e))) sendNow(e, strlen(e));
+                  }
                 } else if (newFrame && !discardMsg && msgBuf) {
                   // continuation frame of a fragmented message: grow the buffer
                   int total = esp_transport_ws_get_read_payload_len(ws);
@@ -858,8 +943,14 @@ class CloudLinkUsermod : public Usermod {
                   if (msgBuf && !discardMsg && msgLen) {
                     msgBuf[msgLen] = '\0';
                     // OTA control frames are handled here, in this task, next to the binary payload
-                    if (otaControlFrame(msgBuf) || httpFrame(msgBuf)) d_free(msgBuf);
-                    else if (xQueueSend(rxq, &msgBuf, pdMS_TO_TICKS(100)) != pdTRUE) d_free(msgBuf);
+                    if (otaControlFrame(msgBuf) || httpFrame(msgBuf) || liveFrame(msgBuf)) d_free(msgBuf);
+                    else if (xQueueSend(rxq, &msgBuf, pdMS_TO_TICKS(CL_RX_WAIT_MS)) != pdTRUE) {
+                      // the main loop is stalled (a config write and bus re-init can hold it for
+                      // seconds); say so rather than leaving the cloud waiting for its timeout
+                      char e[128];
+                      if (reqErrorFrame(msgBuf, 503, "controller busy", e, sizeof(e))) sendNow(e, strlen(e));
+                      d_free(msgBuf);
+                    }
                   } else if (msgBuf) {
                     d_free(msgBuf);
                   }
@@ -884,6 +975,7 @@ class CloudLinkUsermod : public Usermod {
 
     drop:
       if (otaActive) otaAbort(F("link lost"));
+      if (liveActive) livePixelsEnd();
       activeWs = nullptr;
       if (msgBuf) d_free(msgBuf);
       connected = false;
@@ -1005,12 +1097,20 @@ class CloudLinkUsermod : public Usermod {
 
       // inbound frames (retry a frame if the JSON buffer was busy)
       if (deferredMsg) {
-        if (!handleMessage(deferredMsg)) return;
+        bool done = handleMessage(deferredMsg);
+        if (!done && millis() - deferredSince > CL_DEFER_MAX_MS) {
+          // the JSON buffer has been held by something else for too long; answer rather than
+          // retrying until the cloud gives up on us
+          char e[128];
+          if (reqErrorFrame(deferredMsg, 503, "controller busy", e, sizeof(e))) send(e);
+          done = true;
+        }
+        if (!done) return;
         d_free(deferredMsg); deferredMsg = nullptr;
       }
       char* msg;
       while (rxq && xQueueReceive(rxq, &msg, 0) == pdTRUE) {
-        if (!handleMessage(msg)) { deferredMsg = msg; break; }
+        if (!handleMessage(msg)) { deferredMsg = msg; deferredSince = millis(); break; }
         d_free(msg);
       }
 
