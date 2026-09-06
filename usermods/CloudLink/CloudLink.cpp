@@ -65,7 +65,8 @@ void serializeNodes(JsonObject root);
 #define CL_OTA_REPORT_BYTES    65536              // progress frame every 64 KB
 #define CL_HTTP_CHUNK          1460               // one TCP segment per passthrough frame; larger reads starve lwIP's 8 loopback pbufs and the page never arrives
 #define CL_HTTP_MAX            262144             // refuse to relay a response larger than this
-#define CL_HTTP_TIMEOUT_MS     8000
+#define CL_HTTP_TIMEOUT_MS     8000               // wait this long for the local server to start answering
+#define CL_HTTP_IDLE_MS        600                // once it has, this much silence means the response ended
 #define CL_LIVE_HOLD_MS        2500               // how long a pushed frame stays before WLED resumes its own effects
 #define CL_READ_CHUNK          1024
 #define CL_CONNECT_TIMEOUT_MS  10000
@@ -810,6 +811,13 @@ class CloudLinkUsermod : public Usermod {
       unsigned seq = 0;
       bool     gotAny = false;
       unsigned long deadline = millis() + CL_HTTP_TIMEOUT_MS;
+      // The local server does not always close the socket promptly, so waiting for the peer to
+      // hang up cost every relayed page the full timeout — settings pages took seconds to fill
+      // in for no reason. Read the length out of the response headers and stop on the last byte.
+      String   head;
+      bool     headDone = false;
+      long     contentLen = -1;
+      size_t   headerBytes = 0;
 
       // Keep going while there is data or the peer is still up; only give up on a real timeout,
       // because connected() can read false while bytes are still buffered.
@@ -821,8 +829,22 @@ class CloudLinkUsermod : public Usermod {
           continue;
         }
         gotAny = true;
-        deadline = millis() + CL_HTTP_TIMEOUT_MS;
+        deadline = millis() + CL_HTTP_IDLE_MS;
         total += n;
+        if (!headDone) {
+          char tmp[257];
+          size_t take = (size_t)n < sizeof(tmp) - 1 ? (size_t)n : sizeof(tmp) - 1;
+          memcpy(tmp, raw, take); tmp[take] = '\0';
+          head += tmp;
+          int e = head.indexOf(F("\r\n\r\n"));
+          if (e >= 0) {
+            headDone = true;
+            headerBytes = e + 4;
+            int cl = head.indexOf(F("Content-Length: "));
+            if (cl >= 0 && cl < e) contentLen = head.substring(cl + 16).toInt();
+            head = String();
+          } else if (head.length() > 2048) headDone = true;   // no headers to find; stream it blind
+        }
         if (total > CL_HTTP_MAX) { httpFail(id, F("response too large")); break; }
         size_t outLen = 0;
         if (mbedtls_base64_encode((unsigned char*)b64, CL_HTTP_CHUNK * 4 / 3 + 8, &outLen, raw, n) != 0) { httpFail(id, F("encode failed")); break; }
@@ -834,6 +856,7 @@ class CloudLinkUsermod : public Usermod {
         frame += String(b64, outLen);
         frame += F("\"}");
         if (!sendNow(frame)) { setError(CLE_WRITE, 0); break; }
+        if (contentLen >= 0 && total >= headerBytes + (size_t)contentLen) break;   // whole body sent
       }
       if (!gotAny) httpFail(id, F("no response from the local web server"));
       d_free(raw);
