@@ -62,7 +62,7 @@ Controller → cloud:
 Relayed paths (matched loosely, like WLED's own `/json` handler, so the stock UI's
 URLs work unchanged): `GET /json`, `/json/state`, `/json/info`, `/json/si`,
 `/json/eff[ects]`, `/json/pal[ettes]`, `/json/palx?page=N`, `/json/nodes`,
-`/json/fxda[ta]`, `/json/live` (every n-th LED as `"RRGGBB"`, max 256 like WLED, brightness
+`/json/fxda[ta]`, `/json/cfg` (GET and POST — POST applies it and saves), `/json/live` (every n-th LED as `"RRGGBB"`, max 256 like WLED, brightness
 applied, same shape as WLED's), `/presets.json` (raw file); `POST /json`,
 `/json/state`, `/json/si` (WLED state JSON, returns state); `GET /win&...` (WLED HTTP
 API, returns state). Responses larger than WLED's JSON buffer (24 KB on ESP32) return
@@ -71,6 +71,42 @@ status 507; `presets.json` is capped at 32 KB.
 The controller sends a WebSocket PING every 20 s and drops the link if no PONG arrives
 within 10 s. Reconnects back off from 5 s to 2 min; a link that lasted over a minute
 resets the back-off.
+
+## Firmware updates (v1.1)
+
+The cloud streams a new image over this same socket, so the controller needs no HTTPS client
+and no inbound port.
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"type":"ota_begin","id":N,"size":N,"md5":"...","version":"..."}` | cloud → device | start; device calls `Update.begin()` and replies |
+| `{"type":"ota_ready","id":N}` | device → cloud | ready for the payload |
+| *(binary frames)* | cloud → device | the image, in order; written straight to flash |
+| `{"type":"ota_progress","id":N,"written":N,"size":N}` | device → cloud | every 64 KB |
+| `{"type":"ota_done","id":N,"written":N}` | device → cloud | MD5 verified, rebooting |
+| `{"type":"ota_error","id":N,"error":"..."}` | device → cloud | aborted; the old firmware stays |
+| `{"type":"ota_abort","id":N}` | cloud → device | cancel |
+
+While an update is running, binary frames are firmware payload rather than anything else.
+A link drop or 30 s without data aborts cleanly. The device reports its build id as `build`
+in `hello` and on `/cloud/status`, which is how the cloud knows an update is needed.
+
+## HTTP passthrough (v1.1)
+
+Anything the cloud cannot express as a JSON API call — the settings pages, the file editor,
+`skin.css` — is forwarded verbatim:
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"type":"hreq","id":N,"method":"GET\|POST","path":"/settings/wifi","body":"...","ctype":"..."}` | cloud → device | replay this request |
+| `{"type":"hres","id":N,"seq":k,"more":true,"b64":"..."}` | device → cloud | raw response bytes, base64, in order |
+| `{"type":"hres","id":N,"more":false}` | device → cloud | end of response |
+| `{"type":"hres","id":N,"more":false,"error":"..."}` | device → cloud | failed |
+
+The device opens a plain HTTP connection to `127.0.0.1:80` and pipes the request through, so
+it needs no knowledge of any page. DirectAuth allows loopback requests: nothing off-device
+can forge that source address, and the cloud authenticates the user before forwarding.
+Responses are capped at 256 KB.
 
 ## Implementation notes
 
