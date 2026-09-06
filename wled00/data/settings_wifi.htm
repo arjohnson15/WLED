@@ -155,6 +155,36 @@ Static subnet mask:<br>
 			loadJS(getURL('/settings/s.js?p=1'), false);	// If we set async false, file is loaded and executed, then next statement is processed
 			if (loc) d.Sf.action = getURL('/settings/wifi');
 			setTimeout(tE, 500); // wait for DOM to load before calling tE()
+			clInit();
+		}
+
+		// ---- JTS Lights cloud link (CloudLink usermod: GET /cloud/status, POST /cloud/pair) ----
+		function clInit() {
+			fetch(getURL('/cloud/status'), {cache:'no-store'}).then(r=>r.json()).then(s=>{
+				if (s.host) gId('clh').value = s.host;
+				gId('clt').checked = s.tls !== false;
+				gId('clst').innerHTML = s.paired ? ('Linked as <b>'+s.deviceId+'</b>'+(s.connected?' &mdash; connected':' &mdash; offline'))
+					: (s.pairing ? 'Pairing code stored, waiting for WiFi.' : 'Not linked.');
+			}).catch(()=>{gId('clst').textContent = 'Cloud usermod not available.';});
+		}
+		// posts the code; returns a promise that resolves whether or not it worked
+		function clSend() {
+			const code = gId('clc').value.trim();
+			if (!code) return Promise.resolve(true);
+			const body = new URLSearchParams({code: code, host: gId('clh').value.trim(), tls: gId('clt').checked ? 'true' : 'false', port: gId('clt').checked ? '443' : '8787'});
+			return fetch(getURL('/cloud/pair'), {method:'POST', body: body})
+				.then(r=>r.json().then(j=>({ok:r.ok, j:j})))
+				.then(r=>{ gId('clmsg').innerHTML = r.ok ? ' <b style="color:#0b0">saved</b>' : (' <b style="color:#b00">'+(r.j.error||'failed')+'</b>'); return r.ok; })
+				.catch(()=>{ gId('clmsg').innerHTML = ' <b style="color:#b00">request failed</b>'; return false; });
+		}
+		function clLink() { gId('clmsg').textContent = ' working...'; clSend().then(ok=>{ if (ok) clInit(); }); }
+		// store the pairing code before the WiFi save reboots the controller
+		var clDone = false;
+		function clOnSubmit(e) {
+			if (clDone || !gId('clc').value.trim()) return true;
+			e.preventDefault();
+			clSend().then(()=>{ clDone = true; d.Sf.submit(); });
+			return false;
 		}
 
 		var rC = 0; // remote count
@@ -206,7 +236,7 @@ Static subnet mask:<br>
 	</script>
 </head>
 <body>
-<form id="form_s" name="Sf" method="post">
+<form id="form_s" name="Sf" method="post" onsubmit="return clOnSubmit(event)">
 	<div class="toprow">
 	<div class="helpB"><button type="button" onclick="H('features/settings/#wifi-settings')">?</button></div>
 	<button type="button" onclick="B()">Back</button><button type="submit">Save & Connect</button><hr>
@@ -221,6 +251,16 @@ Static subnet mask:<br>
 			<button type="button" id="wifi_add" onclick="addWiFi()">+</button>
 			<button type="button" id="wifi_rem" onclick="remWiFi()">-</button><br>
 		</div>
+	</div>
+	<div class="sec">
+		<h3>JTS Lights cloud</h3>
+		<span id="clst" class="mut">Not linked.</span><br><br>
+		Cloud server:<br><input type="text" id="clh" maxlength="128" placeholder="wled.cloudjohnson.com"><br>
+		Pairing code (from your cloud account):<br><input type="text" id="clc" maxlength="32" placeholder="XXXX-XXXX" style="text-transform:uppercase"><br>
+		<label><input type="checkbox" id="clt" checked> Use TLS (leave on for a hostname, off for a LAN IP)</label><br><br>
+		<button type="button" onclick="clLink()">Link now</button>
+		<span id="clmsg"></span><br>
+		<i>The code is used once the controller is on your WiFi, so you can enter it here during setup.</i>
 	</div>
 	<div class="sec" id="ethd">
 		<h3>Ethernet Type</h3>

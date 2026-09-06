@@ -120,6 +120,15 @@ static String daCookieValue(const String& cookies, const char* name) {
   return String();
 }
 
+// same test WLED's captivePortal() uses, so the gate agrees with it on what a "host" is
+static bool daIsIp(const String& str) {
+  for (size_t i = 0; i < str.length(); i++) {
+    char c = str[i];
+    if (c != '.' && (c < '0' || c > '9')) return false;
+  }
+  return true;
+}
+
 // usernames are restricted so they can be embedded safely in JSON/JS without escaping
 static bool daValidUser(const String& u) {
   if (u.length() == 0 || u.length() > DA_MAX_USER_LEN) return false;
@@ -543,6 +552,14 @@ class DirectAuthUsermod : public Usermod {
     bool shouldBlock(AsyncWebServerRequest* request) {
       if (!enabled) return false;
       if (request->method() == HTTP_OPTIONS) return false;   // CORS preflight carries no credentials by design; WLED answers it
+      // In AP mode let anything addressed to a name (phone captive-portal probes, "http://wled/")
+      // reach WLED's own captivePortal(), which 302s to http://4.3.2.1; that request arrives with
+      // an IP host and is gated normally. Without this the probes get our redirect/401 and the
+      // phone never shows the "sign in to network" popup.
+      if (apActive) {
+        const String& h = request->host();
+        if (h.length() && !daIsIp(h) && h.indexOf(F("wled.me")) < 0 && h.indexOf(cmDNS) < 0 && h.indexOf(':') < 0) return false;
+      }
       if (isPublicPath(request->url())) return false;
       loadCredentials();
       if (!hasCreds) return true;

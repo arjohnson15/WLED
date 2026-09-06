@@ -137,7 +137,7 @@ class CloudLinkUsermod : public Usermod {
 
     // ---------- identity ----------
     void loadIdentity() {
-      deviceId = ""; deviceToken = "";
+      deviceId = ""; deviceToken = ""; pairCode = "";
       if (!WLED_FS.exists(CL_IDENTITY_FILE)) return;
       File f = WLED_FS.open(CL_IDENTITY_FILE, "r");
       if (!f) return;
@@ -147,12 +147,17 @@ class CloudLinkUsermod : public Usermod {
       if (err) { DEBUG_PRINTLN(F("CloudLink: bad cloud.json")); return; }
       deviceId    = doc["id"] | "";
       deviceToken = doc["t"]  | "";
+      String pend = doc["pend"] | "";      // code entered before the controller had WiFi
+      if (validPairCode(pend) && !deviceToken.length()) pairCode = pend;
     }
 
+    // Stores the device identity and any still-unused pairing code. The code has to be on flash
+    // because it is typically entered during AP setup, one reboot before the controller can use it.
     bool saveIdentity() {
       StaticJsonDocument<512> doc;
       doc["id"] = deviceId;
       doc["t"]  = deviceToken;
+      if (pairCode.length() && !deviceToken.length()) doc["pend"] = pairCode;
       File f = WLED_FS.open(CL_IDENTITY_FILE, "w");
       if (!f) return false;
       serializeJson(doc, f);
@@ -458,7 +463,7 @@ class CloudLinkUsermod : public Usermod {
         if (strlen(id) && strlen(tok) && lock()) {
           deviceId = id; deviceToken = tok; pairCode = "";
           unlock();
-          saveIdentity();
+          saveIdentity();   // token stored, "pend" dropped
           setErr(CLE_NONE);
           DEBUG_PRINTLN(F("CloudLink: paired, reconnecting with device token"));
           reconnectRequested = true;
@@ -469,7 +474,7 @@ class CloudLinkUsermod : public Usermod {
         for (int i = 0; i < 5; i++) if (!strcmp(code, serverErrors[i])) idx = i;
         setErr(CLE_SERVER, idx);
         DEBUG_PRINTF_P(PSTR("CloudLink: server error %s\n"), code);
-        if (!strcmp(code, "bad_code") || !strcmp(code, "code_expired")) { if (lock()) { pairCode = ""; unlock(); } }
+        if (!strcmp(code, "bad_code") || !strcmp(code, "code_expired")) { if (lock()) { pairCode = ""; unlock(); } saveIdentity(); }
         if (!strcmp(code, "bad_token") || !strcmp(code, "revoked")) clearIdentity();
       } else if (!strcmp(type, "unpair")) {
         DEBUG_PRINTLN(F("CloudLink: unpaired by server"));
@@ -720,9 +725,9 @@ class CloudLinkUsermod : public Usermod {
       bool haveHost = host.length() > 0;
       unlock();
       if (!haveHost) { sendJson(request, 400, F("{\"error\":\"cloud host not set\"}")); return; }
-      WLED_FS.remove(CL_IDENTITY_FILE);
       enabled = true;
-      configNeedsWrite = true;   // host/port/path/tls/enabled live in cfg.json; the code itself is never written
+      saveIdentity();            // keeps the pending code across the reboot a WiFi save causes
+      serializeConfigToFS();     // host/port/path/tls/enabled live in cfg.json; write now, not at reboot
       setErr(CLE_NONE);
       reconnectRequested = true;
       sendJson(request, 200, F("{\"ok\":true,\"pairing\":true}"));
@@ -814,7 +819,7 @@ class CloudLinkUsermod : public Usermod {
       bool changed = applyConnectionSettings(nHost, nPort, nTls, nPath);
       if (code.length()) {
         if (validPairCode(code)) {
-          if (lock()) { pairCode = code; deviceId = ""; deviceToken = ""; unlock(); WLED_FS.remove(CL_IDENTITY_FILE); changed = true; }
+          if (lock()) { pairCode = code; deviceId = ""; deviceToken = ""; unlock(); saveIdentity(); changed = true; }
         } else DEBUG_PRINTLN(F("CloudLink: ignored malformed pairing code"));
       }
       enabled = nEnabled;

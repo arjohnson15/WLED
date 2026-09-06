@@ -7,13 +7,14 @@ static const char PAGE_login[] PROGMEM = R"wled(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#222">
-<title>WLED Login</title>
+<title>JTS Lights</title>
 <style>
 :root{--bg:#111;--card:#222;--fg:#fff;--mut:#aaa;--acc:#0f8dbf;--err:#e35}
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 .card{background:var(--card);border-radius:14px;padding:28px 26px;width:min(92vw,360px);box-shadow:0 8px 30px #0008}
 h1{margin:0 0 4px;font-size:22px;font-weight:600}
+.brand{font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--acc);font-weight:700;margin-bottom:10px}
 p.sub{margin:0 0 20px;color:var(--mut);font-size:14px}
 label{display:block;font-size:13px;color:var(--mut);margin:12px 0 4px}
 input{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #333;background:#181818;color:var(--fg);font-size:16px}
@@ -24,6 +25,7 @@ button:disabled{opacity:.5;cursor:default}
 .hide{display:none}
 </style></head><body>
 <div class="card">
+<div class="brand">JTS Lights</div>
 <h1 id="ttl">Sign in</h1>
 <p class="sub" id="sub"></p>
 <form id="f" autocomplete="on">
@@ -40,7 +42,7 @@ var $=function(i){return document.getElementById(i)};
 fetch('/auth/status',{cache:'no-store'}).then(function(r){return r.json()}).then(function(s){
  if(s.auth){location.replace(to);return}
  $('sub').textContent=s.name||'WLED';
- if(s.setup){setup=true;$('ttl').textContent='Create admin login';$('c2').classList.remove('hide');$('b').textContent='Create & sign in';$('u').value='admin';$('p').autocomplete='new-password';$('sub').textContent=(s.name||'WLED')+' — first-run setup'}
+ if(s.setup){setup=true;$('ttl').textContent='Create your login';$('c2').classList.remove('hide');$('b').textContent='Create & sign in';$('u').value='admin';$('p').autocomplete='new-password';$('sub').textContent=(s.name||'WLED')+' — first-run setup'}
 }).catch(function(){$('m').textContent='Cannot reach controller'});
 $('f').onsubmit=function(e){
  e.preventDefault();var m=$('m'),b=$('b');m.textContent='';
