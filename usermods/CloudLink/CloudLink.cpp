@@ -73,6 +73,7 @@ void serializeNodes(JsonObject root);
 #define CL_SEND_WAIT_MS        400   // how long a queued outbound frame waits for a free slot
 #define CL_RX_WAIT_MS          1000  // how long an inbound frame waits for the main loop to catch up
 #define CL_DEFER_MAX_MS        5000  // give up retrying a frame that cannot get the JSON buffer
+#define CL_CFG_RESTART_DELAY_MS 1200 // let the answer reach the cloud before restarting into new LED config
 #define CL_WRITE_TIMEOUT_MS    5000
 #define CL_PING_INTERVAL_MS    20000
 #define CL_PONG_TIMEOUT_MS     10000
@@ -397,10 +398,26 @@ class CloudLinkUsermod : public Usermod {
       bool isJson = pathOnly.startsWith("/json");
       String sub = isJson ? pathOnly.substring(5) : String();   // "" or "/state", "/si", ...
 
+      bool restarting = false;
       if (method == "POST" && isJson && sub.indexOf("cfg") > 0) {
         JsonObject body = root["body"];
         if (body.isNull()) status = 400;
-        else { deserializeConfig(body); configNeedsWrite = true; target = Target::none; }
+        else {
+          deserializeConfig(body);
+          if (doInitBusses) {
+            // Rebuilding the LED outputs in place wedges the main loop — and that is the loop
+            // which answers us, so the controller goes deaf to the cloud while still serving its
+            // own web page. Worse, the configuration is only written to flash *after* that
+            // rebuild, so the change is lost with it. Write it now instead and restart into it:
+            // creating the buses at boot is the path that is known to work.
+            doInitBusses = false;
+            cfgRestartAt = millis() + CL_CFG_RESTART_DELAY_MS;   // let this answer go out first
+            restarting = true;
+          } else {
+            configNeedsWrite = true;
+          }
+          target = Target::none;
+        }
       } else if (method == "POST" && isJson && (sub == "" || sub == "/state" || sub == "/si")) {
         JsonObject body = root["body"];
         if (body.isNull()) status = 400;
@@ -444,6 +461,8 @@ class CloudLinkUsermod : public Usermod {
       res["type"]   = "res";
       res["id"]     = id;
       res["status"] = status;
+      // tells the panel to expect the link to drop and come back, rather than to keep asking
+      if (restarting) res.createNestedObject("body")["restarting"] = true;
       if (status == 200) {
         switch (target) {
           case Target::state:    serializeState(res.createNestedObject("body")); break;
@@ -550,6 +569,7 @@ class CloudLinkUsermod : public Usermod {
     size_t        otaReported = 0;
     unsigned long otaLastData = 0;
     volatile unsigned long otaRebootAt = 0;
+    volatile unsigned long cfgRestartAt = 0;   // set when an LED config change needs a restart
 
     // Minimal readers for the small, server-generated OTA frames (no pDoc lock in this task).
     static bool jsonHas(const char* msg, const char* key) { return strstr(msg, key) != nullptr; }
@@ -1126,6 +1146,12 @@ class CloudLinkUsermod : public Usermod {
       if (connected && linkUpPending) { linkUpPending = false; sendHelloOrPair(); }
 
       if (otaRebootAt && (long)(millis() - otaRebootAt) >= 0) { otaRebootAt = 0; doReboot = true; }
+
+      if (cfgRestartAt && (long)(millis() - cfgRestartAt) >= 0) {
+        cfgRestartAt = 0;
+        serializeConfigToFS();   // needs the JSON buffer, so never from inside handleMessage()
+        doReboot = true;
+      }
 
       if (statePending && connected && authenticated && millis() - lastStateChange > CL_STATE_DEBOUNCE_MS) {
         statePending = false;
