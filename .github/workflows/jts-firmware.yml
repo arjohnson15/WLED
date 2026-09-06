@@ -116,3 +116,11 @@ jobs:
           cat /tmp/out.json; echo
           # 409 = this exact image is already published, which is not a failure
           if [ "$code" != "201" ] && [ "$code" != "409" ]; then echo "::error::publish failed with HTTP $code"; exit 1; fi
+          # attach the whole-flash image to the same release, for USB recovery
+          id=$(python3 -c "import json;print(json.load(open('/tmp/out.json')).get('id',''))" 2>/dev/null || true)
+          if [ -n "$id" ]; then
+            fcode=$(curl -sS -o /tmp/fac.json -w '%{http_code}' -X POST "$URL/api/firmware/$id/factory" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" \
+              --data-binary @.pio/build/house_esp32/firmware.factory.bin)
+            echo "factory image: HTTP $fcode"; cat /tmp/fac.json; echo
+          fi
