@@ -42,6 +42,7 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <Update.h>
+#include <mbedtls/base64.h>
 #include "isrg_root_x1.h"
 
 // json.cpp helpers that are not exported through fcn_declare.h
@@ -62,6 +63,9 @@ void serializeNodes(JsonObject root);
 #define CL_MAX_LIVE_LEDS       256                // same as MAX_LIVE_LEDS in json.cpp (file-local there)
 #define CL_OTA_STALL_MS        30000              // no OTA data for this long -> abort and reconnect
 #define CL_OTA_REPORT_BYTES    65536              // progress frame every 64 KB
+#define CL_HTTP_CHUNK          6144               // raw bytes per passthrough frame (~8 KB once base64'd)
+#define CL_HTTP_MAX            262144             // refuse to relay a response larger than this
+#define CL_HTTP_TIMEOUT_MS     8000
 #define CL_READ_CHUNK          1024
 #define CL_CONNECT_TIMEOUT_MS  10000
 #define CL_READ_TIMEOUT_MS     200
@@ -359,13 +363,17 @@ class CloudLinkUsermod : public Usermod {
       String   query    = q >= 0 ? fullPath.substring(q + 1) : String();
       method.toUpperCase();
 
-      enum class Target { none, state, info, si, effects, palettes, palx, nodes, fxdata, all, live, presets };
+      enum class Target { none, state, info, si, effects, palettes, palx, nodes, fxdata, all, live, presets, cfg };
       Target target = Target::none;
       int status = 200;
       bool isJson = pathOnly.startsWith("/json");
       String sub = isJson ? pathOnly.substring(5) : String();   // "" or "/state", "/si", ...
 
-      if (method == "POST" && isJson && (sub == "" || sub == "/state" || sub == "/si")) {
+      if (method == "POST" && isJson && sub.indexOf("cfg") > 0) {
+        JsonObject body = root["body"];
+        if (body.isNull()) status = 400;
+        else { deserializeConfig(body); configNeedsWrite = true; target = Target::none; }
+      } else if (method == "POST" && isJson && (sub == "" || sub == "/state" || sub == "/si")) {
         JsonObject body = root["body"];
         if (body.isNull()) status = 400;
         else { deserializeState(body, CALL_MODE_DIRECT_CHANGE); target = Target::state; }
@@ -386,6 +394,7 @@ class CloudLinkUsermod : public Usermod {
         else if (sub.indexOf("palx") > 0)      target = Target::palx;
         else if (sub.indexOf("fxda") > 0)      target = Target::fxdata;
         else if (sub.indexOf("live") > 0)      target = Target::live;
+        else if (sub.indexOf("cfg") > 0)       target = Target::cfg;
         else if (sub.indexOf("pal") > 0)       target = Target::palettes;
         else status = 404;
       } else if (method == "GET") {
@@ -421,6 +430,7 @@ class CloudLinkUsermod : public Usermod {
           case Target::palettes: res["body"] = serialized((const char*)JSON_palette_names); break;
           case Target::palx:     serializePalettes(res.createNestedObject("body"), page); break;
           case Target::nodes:    serializeNodes(res.createNestedObject("body")); break;
+          case Target::cfg:      serializeConfig(res.createNestedObject("body")); break;
           case Target::fxdata: {
             JsonArray arr = res.createNestedArray("body");
             for (size_t i = 0; i < strip.getModeCount(); i++) {
@@ -599,12 +609,92 @@ class CloudLinkUsermod : public Usermod {
       if (otaWritten >= otaSize) otaFinish();
     }
 
+    // ---------- HTTP passthrough ----------
+    // The cloud forwards anything it cannot express as a JSON API call (settings pages, the
+    // file editor, skin.css) as {"type":"hreq",...}. We replay it against our own web server
+    // over loopback and stream the raw response back base64-encoded, so the cloud never has to
+    // know what any particular page looks like. DirectAuth lets loopback requests through.
+    void httpPassthrough(const char* msg) {
+      uint32_t id = jsonNum(msg, "\"id\"");
+      String method = jsonStr(msg, "\"method\"");
+      String path   = jsonStr(msg, "\"path\"");
+      String ctype  = jsonStr(msg, "\"ctype\"");
+      String body   = jsonStr(msg, "\"body\"");
+      if (!method.length()) method = F("GET");
+      if (!path.startsWith("/")) { httpFail(id, F("bad path")); return; }
+
+      WiFiClient c;
+      c.setTimeout(CL_HTTP_TIMEOUT_MS / 1000);
+      if (!c.connect(IPAddress(127, 0, 0, 1), 80)) { httpFail(id, F("loopback connect failed")); return; }
+
+      String req = method + ' ' + path + F(" HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nAccept-Encoding: identity\r\n");
+      if (body.length()) {
+        req += F("Content-Type: ");
+        req += ctype.length() ? ctype : String(F("application/x-www-form-urlencoded"));
+        req += F("\r\nContent-Length: ");
+        req += body.length();
+        req += F("\r\n");
+      }
+      req += F("\r\n");
+      c.print(req);
+      if (body.length()) c.print(body);
+
+      uint8_t  raw[CL_HTTP_CHUNK];
+      char*    b64 = (char*)d_malloc(CL_HTTP_CHUNK * 4 / 3 + 8);
+      if (!b64) { c.stop(); httpFail(id, F("out of memory")); return; }
+      size_t   total = 0;
+      unsigned seq = 0;
+      unsigned long deadline = millis() + CL_HTTP_TIMEOUT_MS;
+
+      while ((c.connected() || c.available()) && millis() < deadline) {
+        if (!c.available()) { delay(2); continue; }
+        int n = c.read(raw, sizeof(raw));
+        if (n <= 0) continue;
+        deadline = millis() + CL_HTTP_TIMEOUT_MS;
+        total += n;
+        if (total > CL_HTTP_MAX) { httpFail(id, F("response too large")); break; }
+        size_t outLen = 0;
+        if (mbedtls_base64_encode((unsigned char*)b64, CL_HTTP_CHUNK * 4 / 3 + 8, &outLen, raw, n) != 0) { httpFail(id, F("encode failed")); break; }
+        String frame = F("{\"type\":\"hres\",\"id\":");
+        frame += id;
+        frame += F(",\"seq\":");
+        frame += seq++;
+        frame += F(",\"more\":true,\"b64\":\"");
+        frame += String(b64, outLen);
+        frame += F("\"}");
+        send(frame);
+      }
+      d_free(b64);
+      c.stop();
+      String done = F("{\"type\":\"hres\",\"id\":");
+      done += id;
+      done += F(",\"seq\":");
+      done += seq;
+      done += F(",\"more\":false}");
+      send(done);
+    }
+
+    void httpFail(uint32_t id, const __FlashStringHelper* why) {
+      String f = F("{\"type\":\"hres\",\"id\":");
+      f += id;
+      f += F(",\"more\":false,\"error\":\"");
+      f += why;
+      f += F("\"}");
+      send(f);
+    }
+
     // Returns true when the frame was an OTA control frame and has been handled here.
     bool otaControlFrame(const char* msg) {
       if (!strstr(msg, "\"type\":\"ota_")) return false;
       if (jsonHas(msg, "\"ota_begin\"")) { otaBegin(msg); return true; }
       if (jsonHas(msg, "\"ota_abort\"")) { otaAbort(F("cancelled by server")); return true; }
       return false;
+    }
+
+    bool httpFrame(const char* msg) {
+      if (!strstr(msg, "\"type\":\"hreq\"")) return false;
+      httpPassthrough(msg);
+      return true;
     }
 
     // ---------- the network task ----------
@@ -745,7 +835,7 @@ class CloudLinkUsermod : public Usermod {
                   if (msgBuf && !discardMsg && msgLen) {
                     msgBuf[msgLen] = '\0';
                     // OTA control frames are handled here, in this task, next to the binary payload
-                    if (otaControlFrame(msgBuf)) d_free(msgBuf);
+                    if (otaControlFrame(msgBuf) || httpFrame(msgBuf)) d_free(msgBuf);
                     else if (xQueueSend(rxq, &msgBuf, pdMS_TO_TICKS(100)) != pdTRUE) d_free(msgBuf);
                   } else if (msgBuf) {
                     d_free(msgBuf);

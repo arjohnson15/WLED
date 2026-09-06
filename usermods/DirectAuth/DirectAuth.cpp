@@ -552,6 +552,10 @@ class DirectAuthUsermod : public Usermod {
     bool shouldBlock(AsyncWebServerRequest* request) {
       if (!enabled) return false;
       if (request->method() == HTTP_OPTIONS) return false;   // CORS preflight carries no credentials by design; WLED answers it
+      // Requests from the device itself (the CloudLink HTTP passthrough, and this usermod's own
+      // self-test) arrive on loopback. Nothing off-device can forge that source address, and the
+      // cloud has already authenticated the user before forwarding, so let them through.
+      if (request->client() && request->client()->remoteIP() == IPAddress(127, 0, 0, 1)) return false;
       // In AP mode let anything addressed to a name (phone captive-portal probes, "http://wled/")
       // reach WLED's own captivePortal(), which 302s to http://4.3.2.1; that request arrives with
       // an IP host and is gated normally. Without this the probes get our redirect/401 and the
