@@ -150,8 +150,8 @@ class CloudLinkUsermod : public Usermod {
       if (err) { DEBUG_PRINTLN(F("CloudLink: bad cloud.json")); return; }
       deviceId    = doc["id"] | "";
       deviceToken = doc["t"]  | "";
-      String pend = doc["pend"] | "";      // code entered before the controller had WiFi
-      if (validPairCode(pend) && !deviceToken.length()) pairCode = pend;
+      String pend = normalisePairCode(doc["pend"] | "");   // code entered before the controller had WiFi
+      if (pend.length() && !deviceToken.length()) pairCode = pend;
     }
 
     // Stores the device identity and any still-unused pairing code. The code has to be on flash
@@ -200,14 +200,19 @@ class CloudLinkUsermod : public Usermod {
       if (caOverride.indexOf(F("-----BEGIN CERTIFICATE-----")) < 0) caOverride = "";
     }
 
-    static bool validPairCode(const String& c) {
-      if (c.length() < 4 || c.length() > CL_MAX_CODE_LEN) return false;
-      for (size_t i = 0; i < c.length(); i++) {
-        char ch = c[i];
-        if (!(isalnum((unsigned char)ch) || ch == '-')) return false;
+    // Accepts the code however the user typed it (any case, with or without the dash) and
+    // returns it uppercased with separators stripped; empty means "not a usable code".
+    // The cloud normalises the same way, so both forms redeem the same code.
+    static String normalisePairCode(const String& in) {
+      String out;
+      for (size_t i = 0; i < in.length(); i++) {
+        char ch = in[i];
+        if (isalnum((unsigned char)ch)) out += (char)toupper((unsigned char)ch);
+        else if (ch != '-' && ch != ' ' && ch != '_') return String();   // anything else is a typo, not a separator
       }
-      return true;
+      return (out.length() >= 4 && out.length() <= CL_MAX_CODE_LEN) ? out : String();
     }
+    static bool validPairCode(const String& c) { return normalisePairCode(c).length() > 0; }
 
     bool hasToken() { return deviceToken.length() > 0; }
 
@@ -838,19 +843,17 @@ class CloudLinkUsermod : public Usermod {
 
     // POST /cloud/pair  form: code [, host, port, tls, path]
     void handlePair(AsyncWebServerRequest* request) {
-      String code = request->arg("code");
-      code.trim();
-      if (!validPairCode(code)) { sendJson(request, 400, F("{\"error\":\"pairing code: 4-32 letters, digits or dashes\"}")); return; }
+      String code = normalisePairCode(request->arg("code"));
+      if (!code.length()) { sendJson(request, 400, F("{\"error\":\"pairing code: 4-32 letters or digits, dash optional\"}")); return; }
       applyConnectionSettings(request->hasArg("host") ? request->arg("host") : host,
                               request->hasArg("port") ? request->arg("port").toInt() : port,
                               request->hasArg("tls")  ? (request->arg("tls") != "false" && request->arg("tls") != "0") : tls,
                               request->hasArg("path") ? request->arg("path") : path);
+      if (!host.length()) { sendJson(request, 400, F("{\"error\":\"cloud host not set\"}")); return; }
       if (!lock()) { sendJson(request, 503, F("{\"error\":\"busy, retry\"}")); return; }
       pairCode = code;
       deviceId = ""; deviceToken = "";   // a new code replaces any previous registration
-      bool haveHost = host.length() > 0;
       unlock();
-      if (!haveHost) { sendJson(request, 400, F("{\"error\":\"cloud host not set\"}")); return; }
       enabled = true;
       saveIdentity();            // keeps the pending code across the reboot a WiFi save causes
       serializeConfigToFS();     // host/port/path/tls/enabled live in cfg.json; write now, not at reboot
@@ -942,14 +945,9 @@ class CloudLinkUsermod : public Usermod {
       complete &= getJsonValue(top[F("port")], nPort, CL_DEFAULT_PORT);
       complete &= getJsonValue(top[F("tls")],  nTls, true);
       complete &= getJsonValue(top[F("path")], nPath, CL_DEFAULT_PATH);
-      String code = top[F("pairCode")] | "";
-      code.trim();
+      String code = normalisePairCode(top[F("pairCode")] | "");
       bool changed = applyConnectionSettings(nHost, nPort, nTls, nPath);
-      if (code.length()) {
-        if (validPairCode(code)) {
-          if (lock()) { pairCode = code; deviceId = ""; deviceToken = ""; unlock(); saveIdentity(); changed = true; }
-        } else DEBUG_PRINTLN(F("CloudLink: ignored malformed pairing code"));
-      }
+      if (code.length() && lock()) { pairCode = code; deviceId = ""; deviceToken = ""; unlock(); saveIdentity(); changed = true; }
       enabled = nEnabled;
       if (changed) reconnectRequested = true;
       return complete;

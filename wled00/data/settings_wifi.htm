@@ -159,22 +159,30 @@ Static subnet mask:<br>
 		}
 
 		// ---- JTS-CLOUD-JS-START: cloud link (CloudLink usermod: GET /cloud/status, POST /cloud/pair) ----
+		const CL_DEFAULT_HOST = 'wled.cloudjohnson.com';
 		function clInit() {
+			// type the code however you like: case, spaces and the dash are all optional
+			gId('clc').addEventListener('input', function () {
+				const v = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+				this.value = v.length > 4 ? v.slice(0, 4) + '-' + v.slice(4) : v;
+			});
 			fetch(getURL('/cloud/status'), {cache:'no-store'}).then(r=>r.json()).then(s=>{
 				if (s.host) gId('clh').value = s.host;
+				else if (!gId('clh').value) gId('clh').value = CL_DEFAULT_HOST;
 				gId('clt').checked = s.tls !== false;
 				gId('clst').innerHTML = s.paired ? ('Linked as <b>'+s.deviceId+'</b>'+(s.connected?' &mdash; connected':' &mdash; offline'))
-					: (s.pairing ? 'Pairing code stored, waiting for WiFi.' : 'Not linked.');
+					: (s.pairing ? 'Code saved &mdash; this controller will link itself once it joins your WiFi.' : 'Not linked.');
 			}).catch(()=>{gId('clst').textContent = 'Cloud usermod not available.';});
 		}
 		// posts the code; returns a promise that resolves whether or not it worked
 		function clSend() {
 			const code = gId('clc').value.trim();
 			if (!code) return Promise.resolve(true);
-			const body = new URLSearchParams({code: code, host: gId('clh').value.trim(), tls: gId('clt').checked ? 'true' : 'false', port: gId('clt').checked ? '443' : '8787'});
+			const host = gId('clh').value.trim() || CL_DEFAULT_HOST;
+			const body = new URLSearchParams({code: code, host: host, tls: gId('clt').checked ? 'true' : 'false', port: gId('clt').checked ? '443' : '8787'});
 			return fetch(getURL('/cloud/pair'), {method:'POST', body: body})
 				.then(r=>r.json().then(j=>({ok:r.ok, j:j})))
-				.then(r=>{ gId('clmsg').innerHTML = r.ok ? ' <b style="color:#0b0">saved</b>' : (' <b style="color:#b00">'+(r.j.error||'failed')+'</b>'); return r.ok; })
+				.then(r=>{ gId('clmsg').innerHTML = r.ok ? ' <b style="color:#0b0">saved &mdash; will link after WiFi connects</b>' : (' <b style="color:#b00">'+(r.j.error||'failed')+'</b>'); return r.ok; })
 				.catch(()=>{ gId('clmsg').innerHTML = ' <b style="color:#b00">request failed</b>'; return false; });
 		}
 		function clLink() { gId('clmsg').textContent = ' working...'; clSend().then(ok=>{ if (ok) clInit(); }); }
@@ -257,12 +265,12 @@ Static subnet mask:<br>
 	<div class="sec">
 		<h3>JTS Lights cloud</h3>
 		<span id="clst" class="mut">Not linked.</span><br><br>
-		Cloud server:<br><input type="text" id="clh" maxlength="128" placeholder="wled.cloudjohnson.com"><br>
-		Pairing code (from your cloud account):<br><input type="text" id="clc" maxlength="32" placeholder="XXXX-XXXX" style="text-transform:uppercase"><br>
+		Cloud server:<br><input type="text" id="clh" maxlength="128" value="wled.cloudjohnson.com"><br>
+		Pairing code (from your cloud account):<br><input type="text" id="clc" maxlength="9" placeholder="XXXXXXXX" autocapitalize="characters" autocomplete="off" spellcheck="false"><br>
 		<label><input type="checkbox" id="clt" checked> Use TLS (leave on for a hostname, off for a LAN IP)</label><br><br>
 		<button type="button" onclick="clLink()">Link now</button>
 		<span id="clmsg"></span><br>
-		<i>The code is used once the controller is on your WiFi, so you can enter it here during setup.</i>
+		<i>Enter the code here during setup: it is stored and used as soon as this controller joins your WiFi. The dash is optional.</i>
 	</div>
 	<!-- JTS-CLOUD-SECTION-END -->
 	<div class="sec" id="ethd">
