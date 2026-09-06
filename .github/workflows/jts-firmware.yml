@@ -1,0 +1,112 @@
+# JTS Lights firmware pipeline.
+#
+#  * sync    - merges upstream wled/WLED into this fork's main (weekly, or on demand)
+#  * build   - builds the house_esp32 image on every push to main
+#  * publish - uploads that image to the JTS Lights cloud, which then offers it to the
+#              controllers as an over-the-air update
+#
+# Repository secrets needed:
+#   JTS_CLOUD_URL    e.g. https://wled.cloudjohnson.com
+#   JTS_CLOUD_TOKEN  matches FIRMWARE_TOKEN on the cloud server
+name: JTS firmware
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**/*.md']
+  schedule:
+    - cron: '17 6 * * 1'      # Mondays, upstream sync
+  workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: 'Merge upstream wled/WLED before building'
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    # Only for the schedule or an explicit request; a normal push just builds.
+    if: github.event_name == 'schedule' || inputs.sync_upstream
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Merge upstream
+        id: merge
+        run: |
+          git config user.name "JTS Lights CI"
+          git config user.email "andrew@reditech.com"
+          git remote add upstream https://github.com/wled/WLED.git || true
+          git fetch upstream main
+          BEFORE=$(git rev-parse HEAD)
+          if git merge --no-edit upstream/main; then
+            AFTER=$(git rev-parse HEAD)
+            if [ "$BEFORE" = "$AFTER" ]; then echo "already up to date"; echo "merged=false" >> $GITHUB_OUTPUT; exit 0; fi
+            git push origin main
+            echo "merged=true" >> $GITHUB_OUTPUT
+          else
+            # Conflicts need a human: leave main untouched and fail loudly.
+            git merge --abort
+            echo "::error::upstream merge has conflicts - resolve locally"
+            exit 1
+          fi
+
+  build:
+    if: always() && !cancelled() && (needs.sync.result == 'success' || needs.sync.result == 'skipped')
+    needs: [sync]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('platformio.ini', 'platformio_override.ini') }}
+          restore-keys: pio-
+      - name: Install tooling
+        run: |
+          pip install --quiet platformio
+          npm ci
+      - name: Build web UI and firmware
+        run: |
+          npm run build
+          pio run -e house_esp32
+      - name: Collect version info
+        id: v
+        run: |
+          echo "version=$(date -u +%Y-%m-%d).$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build=$(grep -oP "JTS_BUILD=\\\\?'?\"?\K[0-9]+" .pio/build/house_esp32/idedata.json 2>/dev/null | head -1)" >> $GITHUB_OUTPUT
+          ls -la .pio/build/house_esp32/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: house_esp32
+          path: |
+            .pio/build/house_esp32/firmware.bin
+            .pio/build/house_esp32/firmware.factory.bin
+      - name: Publish to the JTS Lights cloud
+        if: github.ref == 'refs/heads/main' && vars.PUBLISH_TO_CLOUD != 'false'
+        env:
+          URL: ${{ secrets.JTS_CLOUD_URL }}
+          TOKEN: ${{ secrets.JTS_CLOUD_TOKEN }}
+        run: |
+          if [ -z "$URL" ] || [ -z "$TOKEN" ]; then echo "cloud secrets not set, skipping publish"; exit 0; fi
+          BUILD=$(date -u +%s)
+          code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -X POST "$URL/api/firmware" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            -H "X-FW-Version: ${{ steps.v.outputs.version }}" \
+            -H "X-FW-Build: $BUILD" \
+            -H "X-FW-Source: github-actions" \
+            -H "X-FW-Notes: $(git log -1 --pretty=%s | head -c 200)" \
+            --data-binary @.pio/build/house_esp32/firmware.bin)
+          cat /tmp/out.json; echo
+          # 409 = this exact image is already published, which is not a failure
+          if [ "$code" != "201" ] && [ "$code" != "409" ]; then echo "::error::publish failed with HTTP $code"; exit 1; fi

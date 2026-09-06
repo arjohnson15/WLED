@@ -41,6 +41,7 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <Update.h>
 #include "isrg_root_x1.h"
 
 // json.cpp helpers that are not exported through fcn_declare.h
@@ -59,6 +60,8 @@ void serializeNodes(JsonObject root);
 #define CL_MAX_MSG_LEN         JSON_BUFFER_SIZE   // frames bigger than WLED's JSON buffer are dropped
 #define CL_MAX_PRESETS         32768              // presets.json larger than this answers 507
 #define CL_MAX_LIVE_LEDS       256                // same as MAX_LIVE_LEDS in json.cpp (file-local there)
+#define CL_OTA_STALL_MS        30000              // no OTA data for this long -> abort and reconnect
+#define CL_OTA_REPORT_BYTES    65536              // progress frame every 64 KB
 #define CL_READ_CHUNK          1024
 #define CL_CONNECT_TIMEOUT_MS  10000
 #define CL_READ_TIMEOUT_MS     200
@@ -235,6 +238,9 @@ class CloudLinkUsermod : public Usermod {
       root["name"]  = serverDescription;
       root["mac"]   = escapedMac;
       root["ver"]   = versionString;
+      #ifdef JTS_BUILD
+      root["build"] = JTS_BUILD;       // our own build id, so the cloud can tell releases apart
+      #endif
       root["ip"]    = WLEDNetwork.localIP().toString();
     }
 
@@ -486,6 +492,116 @@ class CloudLinkUsermod : public Usermod {
       return true;
     }
 
+    // ---------- firmware update over the cloud link ----------
+    // The cloud sends {"type":"ota_begin",...} then raw binary frames; both are handled in the
+    // network task (WLED's own /update runs on the async_tcp task, so this is the same pattern).
+    bool          otaActive   = false;
+    uint32_t      otaId       = 0;
+    size_t        otaSize     = 0;
+    size_t        otaWritten  = 0;
+    size_t        otaReported = 0;
+    unsigned long otaLastData = 0;
+    volatile unsigned long otaRebootAt = 0;
+
+    // Minimal readers for the small, server-generated OTA frames (no pDoc lock in this task).
+    static bool jsonHas(const char* msg, const char* key) { return strstr(msg, key) != nullptr; }
+    static size_t jsonNum(const char* msg, const char* key) {
+      const char* p = strstr(msg, key);
+      if (!p) return 0;
+      p += strlen(key);
+      while (*p == ' ' || *p == ':' || *p == '"') p++;
+      return (size_t)strtoul(p, nullptr, 10);
+    }
+    static String jsonStr(const char* msg, const char* key) {
+      const char* p = strstr(msg, key);
+      if (!p) return String();
+      p += strlen(key);
+      while (*p == ' ' || *p == ':') p++;
+      if (*p != '"') return String();
+      p++;
+      const char* e = strchr(p, '"');
+      return e ? String(p).substring(0, e - p) : String();
+    }
+
+    void otaReply(const __FlashStringHelper* type, const String& err = String()) {
+      String out = F("{\"type\":\"");
+      out += type;
+      out += F("\",\"id\":");
+      out += otaId;
+      if (err.length()) { out += F(",\"error\":\""); out += err; out += '"'; }
+      else { out += F(",\"written\":"); out += otaWritten; out += F(",\"size\":"); out += otaSize; }
+      out += '}';
+      send(out);
+    }
+
+    void otaAbort(const String& why) {
+      if (!otaActive) return;
+      otaActive = false;
+      Update.abort();
+      strip.resume();
+      UsermodManager::onUpdateBegin(false);   // let usermods restart whatever they stopped
+      DEBUG_PRINTF_P(PSTR("CloudLink: OTA aborted (%s)\n"), why.c_str());
+      otaReply(F("ota_error"), why);
+    }
+
+    // {"type":"ota_begin","id":N,"size":N,"md5":"..."}
+    void otaBegin(const char* msg) {
+      if (otaActive) otaAbort(F("restarted"));
+      otaId   = jsonNum(msg, "\"id\"");
+      otaSize = jsonNum(msg, "\"size\"");
+      String md5 = jsonStr(msg, "\"md5\"");
+      otaWritten = 0; otaReported = 0;
+      if (otaSize < 0x10000) { otaReply(F("ota_error"), F("bad size")); return; }
+      if (Update.isRunning()) { otaReply(F("ota_error"), F("an update is already running")); return; }
+      UsermodManager::onUpdateBegin(true);
+      strip.suspend();
+      strip.resetSegments();          // free as much RAM as possible, as WLED's own updater does
+      if (!Update.begin(otaSize)) {
+        String e = Update.errorString();
+        strip.resume();
+        UsermodManager::onUpdateBegin(false);
+        otaReply(F("ota_error"), e);
+        return;
+      }
+      if (md5.length() == 32) Update.setMD5(md5.c_str());
+      otaActive = true;
+      otaLastData = millis();
+      DEBUG_PRINTF_P(PSTR("CloudLink: OTA started, %u bytes\n"), (unsigned)otaSize);
+      otaReply(F("ota_ready"));
+    }
+
+    void otaFinish() {
+      otaActive = false;
+      if (!Update.end(true)) {
+        String e = Update.errorString();
+        strip.resume();
+        UsermodManager::onUpdateBegin(false);
+        DEBUG_PRINTF_P(PSTR("CloudLink: OTA failed: %s\n"), e.c_str());
+        otaReply(F("ota_error"), e);
+        return;
+      }
+      DEBUG_PRINTLN(F("CloudLink: OTA complete, rebooting"));
+      otaReply(F("ota_done"));
+      otaRebootAt = millis() + 1500;   // let the frame go out before the main loop reboots
+    }
+
+    void otaData(const uint8_t* data, size_t len) {
+      if (!otaActive) return;
+      otaLastData = millis();
+      if (Update.write(const_cast<uint8_t*>(data), len) != len) { otaAbort(Update.errorString()); return; }
+      otaWritten += len;
+      if (otaWritten - otaReported >= CL_OTA_REPORT_BYTES) { otaReported = otaWritten; otaReply(F("ota_progress")); }
+      if (otaWritten >= otaSize) otaFinish();
+    }
+
+    // Returns true when the frame was an OTA control frame and has been handled here.
+    bool otaControlFrame(const char* msg) {
+      if (!strstr(msg, "\"type\":\"ota_")) return false;
+      if (jsonHas(msg, "\"ota_begin\"")) { otaBegin(msg); return true; }
+      if (jsonHas(msg, "\"ota_abort\"")) { otaAbort(F("cancelled by server")); return true; }
+      return false;
+    }
+
     // ---------- the network task ----------
     bool wantConnection() {
       if (!enabled || !WLED_CONNECTED) return false;
@@ -597,9 +713,12 @@ class CloudLinkUsermod : public Usermod {
               case WS_TRANSPORT_OPCODES_PONG:
                 awaitingPong = false;
                 break;
-              case WS_TRANSPORT_OPCODES_TEXT:
               case WS_TRANSPORT_OPCODES_BINARY:
+                if (otaActive) { otaData((const uint8_t*)chunk, n); break; }   // firmware payload
+                // fall through: a binary frame outside an update is treated as text
+              case WS_TRANSPORT_OPCODES_TEXT:
               case WS_TRANSPORT_OPCODES_CONT: {
+                if (otaActive && opcode == WS_TRANSPORT_OPCODES_CONT) { otaData((const uint8_t*)chunk, n); break; }
                 if (newFrame && opcode != WS_TRANSPORT_OPCODES_CONT) {
                   // first frame of a new message: buffer sized from this frame's length (a stray CONT without a start is ignored)
                   if (msgBuf) { d_free(msgBuf); msgBuf = nullptr; }
@@ -620,7 +739,9 @@ class CloudLinkUsermod : public Usermod {
                 if (frameDone && fin) {
                   if (msgBuf && !discardMsg && msgLen) {
                     msgBuf[msgLen] = '\0';
-                    if (xQueueSend(rxq, &msgBuf, pdMS_TO_TICKS(100)) != pdTRUE) d_free(msgBuf);
+                    // OTA control frames are handled here, in this task, next to the binary payload
+                    if (otaControlFrame(msgBuf)) d_free(msgBuf);
+                    else if (xQueueSend(rxq, &msgBuf, pdMS_TO_TICKS(100)) != pdTRUE) d_free(msgBuf);
                   } else if (msgBuf) {
                     d_free(msgBuf);
                   }
@@ -640,9 +761,11 @@ class CloudLinkUsermod : public Usermod {
           lastPing = now; pingSent = now; awaitingPong = true;
         }
         if (awaitingPong && now - pingSent > CL_PONG_TIMEOUT_MS) { setError(CLE_PONG, 0); goto drop; }
+        if (otaActive && now - otaLastData > CL_OTA_STALL_MS) otaAbort(F("stalled"));
       }
 
     drop:
+      if (otaActive) otaAbort(F("link lost"));
       if (msgBuf) d_free(msgBuf);
       connected = false;
       authenticated = false;
@@ -705,6 +828,9 @@ class CloudLinkUsermod : public Usermod {
       doc["authed"]    = (bool)authenticated;
       doc["error"]     = errorText();
       doc["reconnects"]= reconnects;
+      #ifdef JTS_BUILD
+      doc["build"]     = JTS_BUILD;
+      #endif
       String out;
       serializeJson(doc, out);
       sendJson(request, 200, out);
@@ -767,6 +893,8 @@ class CloudLinkUsermod : public Usermod {
       }
 
       if (connected && linkUpPending) { linkUpPending = false; sendHelloOrPair(); }
+
+      if (otaRebootAt && (long)(millis() - otaRebootAt) >= 0) { otaRebootAt = 0; doReboot = true; }
 
       if (statePending && connected && authenticated && millis() - lastStateChange > CL_STATE_DEBOUNCE_MS) {
         statePending = false;
