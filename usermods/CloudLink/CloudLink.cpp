@@ -71,6 +71,7 @@ void serializeNodes(JsonObject root);
 #define CL_READ_CHUNK          1024
 #define CL_CONNECT_TIMEOUT_MS  10000
 #define CL_READ_TIMEOUT_MS     200
+#define CL_READ_EMPTY_MAX      50    // empty reads in a row before the link counts as lost (~10 s)
 #define CL_SEND_WAIT_MS        400   // how long a queued outbound frame waits for a free slot
 #define CL_RX_WAIT_MS          1000  // how long an inbound frame waits for the main loop to catch up
 #define CL_DEFER_MAX_MS        5000  // give up retrying a frame that cannot get the JSON buffer
@@ -962,7 +963,7 @@ class CloudLinkUsermod : public Usermod {
       char* msgBuf = nullptr;         // message being assembled (may span several frames)
       size_t msgLen = 0, msgCap = 0;
       int frameRemaining = 0;         // payload bytes still to read for the current frame
-      int zeroReads = 0;              // consecutive empty reads after poll said "readable"
+      int emptyReads = 0;             // consecutive reads that delivered nothing
       char chunk[CL_READ_CHUNK];
       unsigned long lastPing = millis();
       unsigned long pingSent = 0;
@@ -984,18 +985,28 @@ class CloudLinkUsermod : public Usermod {
           if (r < 0) { setError(CLE_SOCKET, esp_transport_get_errno(ws)); goto drop; }
           if (r > 0) {
             int n = esp_transport_read(ws, chunk, sizeof(chunk), CL_READ_TIMEOUT_MS);
-            if (n < 0) { setError(CLE_READ, esp_transport_get_errno(ws)); goto drop; }
+            // A read that comes back empty-handed is not a broken link. It is what a timeout
+            // looks like, and during a firmware update this task spends tens of milliseconds at
+            // a time inside a flash erase with the cache off — the next record simply has not
+            // arrived yet. Treating that as fatal tore the session down mid-update, at a
+            // different point every time, and the controller reconnected running the old image.
+            // Give up only when it keeps happening; the pong deadline and the update stall timer
+            // still catch a link that is genuinely gone.
+            if (n < 0) {
+              if (++emptyReads > CL_READ_EMPTY_MAX) { setError(CLE_READ, esp_transport_get_errno(ws)); goto drop; }
+              continue;
+            }
             bool newFrame = (frameRemaining == 0);
-            if (n == 0 && !newFrame) {   // readable but nothing delivered mid-frame: timeout, or the peer vanished
-              if (++zeroReads > 20) { setError(CLE_LOST, esp_transport_get_errno(ws)); goto drop; }
+            if (n == 0 && !newFrame) {   // readable but nothing delivered mid-frame
+              if (++emptyReads > CL_READ_EMPTY_MAX) { setError(CLE_LOST, esp_transport_get_errno(ws)); goto drop; }
               continue;
             }
             int opcode = esp_transport_ws_get_read_opcode(ws) & 0x0F;
             if (n == 0 && opcode == WS_TRANSPORT_OPCODES_NONE) {   // no frame at all
-              if (++zeroReads > 20) { setError(CLE_LOST, esp_transport_get_errno(ws)); goto drop; }
+              if (++emptyReads > CL_READ_EMPTY_MAX) { setError(CLE_LOST, esp_transport_get_errno(ws)); goto drop; }
               continue;
             }
-            zeroReads = 0;
+            emptyReads = 0;
             // Zero-length frames (the server's empty PING/PONG/CLOSE) legitimately return n == 0
             // with the opcode set; they must still be handled below.
             if (newFrame) frameRemaining = esp_transport_ws_get_read_payload_len(ws);   // reads may return a frame in pieces
