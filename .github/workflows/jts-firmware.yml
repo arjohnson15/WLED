@@ -111,14 +111,17 @@ jobs:
             -H "X-FW-Version: ${{ steps.v.outputs.version }}" \
             -H "X-FW-Build: $BUILD" \
             -H "X-FW-Source: github-actions" \
+            -H "X-FW-Commit: ${{ github.sha }}" \
             -H "X-FW-Notes: $(git log -1 --pretty=%s | head -c 200)" \
             --data-binary @.pio/build/house_esp32/firmware.bin)
           cat /tmp/out.json; echo
-          # 409 = this exact image is already published, which is not a failure
-          if [ "$code" != "201" ] && [ "$code" != "409" ]; then echo "::error::publish failed with HTTP $code"; exit 1; fi
+          # 409 = this exact image is already published; 200 = this commit already has a release,
+          # published by hand before the workflow got here. Neither is a failure.
+          if [ "$code" != "201" ] && [ "$code" != "409" ] && [ "$code" != "200" ]; then echo "::error::publish failed with HTTP $code"; exit 1; fi
+          dup=$(python3 -c "import json;print(json.load(open('/tmp/out.json')).get('duplicate',''))" 2>/dev/null || true)
           # attach the whole-flash image to the same release, for USB recovery
           id=$(python3 -c "import json;print(json.load(open('/tmp/out.json')).get('id',''))" 2>/dev/null || true)
-          if [ -n "$id" ]; then
+          if [ -n "$id" ] && [ -z "$dup" ]; then
             fcode=$(curl -sS -o /tmp/fac.json -w '%{http_code}' -X POST "$URL/api/firmware/$id/factory" \
               -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" \
               --data-binary @.pio/build/house_esp32/firmware.factory.bin)
