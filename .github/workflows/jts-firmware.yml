@@ -49,6 +49,15 @@ jobs:
               echo "::error::the merge dropped one of this fork's changes - not pushing"
               git reset --hard "$BEFORE"; exit 1
             fi
+            # Keep this fork's workflow files exactly as they are. Upstream's belong to their
+            # release pipeline, not ours, and GITHUB_TOKEN is not allowed to push a change under
+            # .github/workflows at all - one upstream edit there fails the whole sync.
+            if ! git diff --quiet "$BEFORE" HEAD -- .github/workflows; then
+              git rm -rq --ignore-unmatch .github/workflows
+              git checkout "$BEFORE" -- .github/workflows
+              git commit -q --amend --no-edit
+              echo "kept this fork's workflow files out of the merge"
+            fi
             git push origin main
             echo "merged=true" >> $GITHUB_OUTPUT
           else
