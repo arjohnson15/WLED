@@ -98,6 +98,31 @@ While an update is running, binary frames are firmware payload rather than anyth
 A link drop or 30 s without data aborts cleanly. The device reports its build id as `build`
 in `hello` and on `/cloud/status`, which is how the cloud knows an update is needed.
 
+The ping/pong deadline does **not** run while an update is in flight. Everything the server
+sends arrives on this one socket in order, so its pong is queued behind every firmware byte
+already sent; a controller that flashes slower than the server streams would not read the pong
+for far longer than the 10 s deadline and would drop a healthy link, reconnecting on the old
+image. Arriving bytes are the proof of life during a transfer, and the 30 s stall timer is the
+deadline that belongs to one. The server pairs this by never running more than 192 KB ahead of
+the bytes the controller has acknowledged.
+
+## Writing a file (v1.2)
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"type":"putfile","id":N,"path":"/ledmap.json","body":"..."}` | cloud → device | write the file, replacing it |
+| `{"type":"putfile","id":N,"path":"/ledmap.json"}` | cloud → device | no `body`: remove the file |
+| `{"type":"res","id":N,"status":200,"body":{"ok":true}}` | device → cloud | done |
+
+Written through `/put.tmp` and renamed, so a link that drops mid-write cannot leave a
+half-parsed file behind. `cfg.json`, `wsec.json`, `/auth*` and `/cloud*` are refused: the
+first has its own merge-and-reboot path, and the rest hold secrets.
+
+This exists for `/ledmap.json`. WLED reads the LED order from a file, there is no JSON API
+that writes one, and the HTTP passthrough cannot carry a file body — `jsonStr()` stops at the
+first quote, and a JSON file is nothing but quotes. `{"ledmap":0}` in a state write makes the
+controller load it without a reboot (`wled.cpp:249`).
+
 ## HTTP passthrough (v1.1)
 
 Anything the cloud cannot express as a JSON API call — the settings pages, the file editor,

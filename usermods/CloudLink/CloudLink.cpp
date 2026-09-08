@@ -610,8 +610,51 @@ class CloudLinkUsermod : public Usermod {
         reconnectRequested = true;
       } else if (!strcmp(type, "ping")) {
         send(F("{\"type\":\"pong\"}"));
+      } else if (!strcmp(type, "putfile")) {
+        handlePutFile(root);
       }
       return true;
+    }
+
+    // Writes one small file to the controller's filesystem on the cloud's behalf, or removes it
+    // when no body is given. This exists for /ledmap.json: WLED reads the LED order from a file,
+    // there is no JSON API that writes one, and the HTTP passthrough cannot carry a file body —
+    // its reader stops at the first quote, and a JSON file is nothing but quotes.
+    //
+    // Written through a temporary and renamed, so a link that drops mid-write cannot leave a
+    // half-parsed map behind. The files that hold secrets or the whole configuration are not
+    // writable this way; cfg.json has its own merge path that knows how to reboot into a change.
+    void handlePutFile(JsonObject root) {
+      uint32_t    id   = root["id"] | 0UL;
+      String      path = root["path"] | "";
+      const char* body = root["body"];
+      String      err;
+
+      if (!path.startsWith("/") || path.indexOf("..") >= 0 || path.length() > 31) err = F("bad path");
+      else if (path.equalsIgnoreCase("/cfg.json") || path.equalsIgnoreCase("/wsec.json")
+            || path.startsWith("/auth") || path.startsWith("/cloud")) err = F("that file is not writable from the cloud");
+      else if (!body) {
+        if (WLED_FS.exists(path) && !WLED_FS.remove(path)) err = F("could not remove it");
+      } else {
+        size_t want = strlen(body);
+        File w = WLED_FS.open(F("/put.tmp"), "w");
+        if (!w) err = F("could not open a temporary file");
+        else {
+          size_t wrote = w.print(body);
+          w.close();
+          if (wrote != want) { WLED_FS.remove(F("/put.tmp")); err = F("ran out of room"); }
+          else {
+            WLED_FS.remove(path);
+            if (!WLED_FS.rename(F("/put.tmp"), path)) { WLED_FS.remove(F("/put.tmp")); err = F("could not rename it"); }
+          }
+        }
+      }
+
+      if (!id) return;
+      char out[192];
+      if (err.length()) snprintf(out, sizeof(out), "{\"type\":\"res\",\"id\":%lu,\"status\":500,\"error\":\"%s\"}", (unsigned long)id, err.c_str());
+      else              snprintf(out, sizeof(out), "{\"type\":\"res\",\"id\":%lu,\"status\":200,\"body\":{\"ok\":true}}", (unsigned long)id);
+      if (!sendNow(out, strlen(out))) send(out);
     }
 
     // ---------- firmware update over the cloud link ----------
