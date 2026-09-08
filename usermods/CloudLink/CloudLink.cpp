@@ -1082,12 +1082,22 @@ class CloudLinkUsermod : public Usermod {
         }
 
         // ---- heartbeat ----
+        // Not while an update is running. Everything the server sends arrives on this one
+        // socket in order, so its pong is queued behind every firmware byte already in flight;
+        // a controller that flashes slower than the server sends will not read that pong for
+        // far longer than CL_PONG_TIMEOUT_MS and would tear down a link that is demonstrably
+        // alive, then reconnect still running the old image. Bytes arriving are the better
+        // proof of life, and CL_OTA_STALL_MS is the deadline that belongs to a transfer.
         unsigned long now = millis();
-        if (now - lastPing > CL_PING_INTERVAL_MS) {
-          esp_transport_ws_send_raw(ws, WS_FIN(WS_TRANSPORT_OPCODES_PING), "", 0, CL_WRITE_TIMEOUT_MS);
-          lastPing = now; pingSent = now; awaitingPong = true;
+        if (otaActive) {
+          lastPing = now; awaitingPong = false;   // resume pinging once the image is in
+        } else {
+          if (now - lastPing > CL_PING_INTERVAL_MS) {
+            esp_transport_ws_send_raw(ws, WS_FIN(WS_TRANSPORT_OPCODES_PING), "", 0, CL_WRITE_TIMEOUT_MS);
+            lastPing = now; pingSent = now; awaitingPong = true;
+          }
+          if (awaitingPong && now - pingSent > CL_PONG_TIMEOUT_MS) { setError(CLE_PONG, 0); goto drop; }
         }
-        if (awaitingPong && now - pingSent > CL_PONG_TIMEOUT_MS) { setError(CLE_PONG, 0); goto drop; }
         if (otaActive && now - otaLastData > CL_OTA_STALL_MS) otaAbort(F("stalled"));
       }
 
