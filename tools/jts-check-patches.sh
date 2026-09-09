@@ -38,6 +38,9 @@ check "cloud update markup end"   wled00/data/update.htm               "JTS-CLOU
 check "board picker on LED page"  wled00/data/settings_leds.htm        "JTS-BOARD-PICKER-START"
 check "board picker script"       wled00/data/settings_leds.htm        "JTS-BOARD-JS-START"
 check "board picker is called"    wled00/data/settings_leds.htm        "jtsFillBoards()"
+check "dev banner disabled (common.js)" wled00/data/common.js          "JTS-NO-DEVBANNER-START"
+check "dev banner removed (index.htm)"  wled00/data/index.htm          "JTS-NO-DEVBANNER"
+check "dev banner removed (welcome.htm)" wled00/data/welcome.htm       "JTS-NO-DEVBANNER"
 
 if [ $fail -ne 0 ]; then
   echo

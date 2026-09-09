@@ -26,7 +26,7 @@
 	--c-tba: rgba(102, 102, 102, var(--t-b));
 	--c-tbh: rgba(51, 51, 51, var(--t-b));
 	/*following are internal*/
-	--dbh: 24px; /* dev banner height */
+	--dbh: 0px; /* JTS-NO-DEVBANNER: was 24px; the banner itself is removed (index.htm, common.js) */
 	--th: calc(70px + var(--dbh));
 	--tp: calc(70px + var(--dbh));
 	--bh: 63px;

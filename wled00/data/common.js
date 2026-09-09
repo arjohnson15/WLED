@@ -6,6 +6,14 @@ var loc = false, locip, locproto = "http:";
 // by setting `window.__noDevBanner = true` before common.js loads.
 // Skipped inside iframes since the embedding page already shows its own banner.
 (function devBanner() {
+	// JTS-NO-DEVBANNER-START — this fork is a real product running in Andrew's house and shared
+	// with family members (see src/household.js in cloud/), not work-in-progress scaffolding.
+	// Upstream's own "not for production use" banner is simply wrong here, on every page that
+	// loads this file. Disabled with an early return rather than deleted, so a future upstream
+	// change to the body below still applies textually and the diff stays legible; flip this one
+	// line to bring it back if it is ever needed while testing an upstream merge.
+	return;
+	// JTS-NO-DEVBANNER-END
 	if (window.__noDevBanner) return;
 	try { if (window.self !== window.top) return; } catch (e) { return; } // cross-origin iframe, be safe and skip
 	function add() {
