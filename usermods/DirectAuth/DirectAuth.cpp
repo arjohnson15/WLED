@@ -602,11 +602,6 @@ class DirectAuthUsermod : public Usermod {
 
     // ---- Usermod API ----
     void setup() override {
-      // JTS_FREE_UART0_LED_PINS itself is handled in wled.cpp, ahead of beginStrip():
-      // by the time any usermod's setup() runs, strip.finalizeInit() has already created
-      // the LED buses. Releasing GPIO1/GPIO3 from here (as an earlier version of this did)
-      // reset pins RMT was already actively driving and hung the main loop on real hardware
-      // (confirmed 2026-09-11) -- too late to be safe.
       loadCredentials();
       loadSessions();
       // Registered from setup(), which WLED runs before initServer(): this handler

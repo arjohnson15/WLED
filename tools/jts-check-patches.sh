@@ -41,8 +41,6 @@ check "board picker is called"    wled00/data/settings_leds.htm        "jtsFillB
 check "dev banner disabled (common.js)" wled00/data/common.js          "JTS-NO-DEVBANNER-START"
 check "dev banner removed (index.htm)"  wled00/data/index.htm          "JTS-NO-DEVBANNER"
 check "dev banner removed (welcome.htm)" wled00/data/welcome.htm       "JTS-NO-DEVBANNER"
-check "free UART0 LED pins (start)" wled00/wled.cpp                    "JTS-FREE-UART0-PINS-START"
-check "free UART0 LED pins (end)"   wled00/wled.cpp                    "JTS-FREE-UART0-PINS-END"
 check "WiFi scan fix (start)"       wled00/json.cpp                    "JTS-WIFI-SCAN-FIX-START"
 check "WiFi scan fix (end)"         wled00/json.cpp                    "JTS-WIFI-SCAN-FIX-END"
 

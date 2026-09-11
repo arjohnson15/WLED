@@ -30,7 +30,6 @@ re-apply if an upstream merge drops it.
 | `wled00/data/welcome.htm` | (same file as above) the banner div and its inline style block removed too |
 | `wled00/data/common.js` | the banner's dynamic injector (runs on every settings page) disabled with an early `return` |
 | `wled00/data/index.css` | `--dbh` (banner height) set to `0px` so nothing that positions off it leaves a gap |
-| `wled00/wled.cpp` | `JTS_FREE_UART0_LED_PINS` (off by default) skips `Serial.begin()`/the RX pulldown in `WLED::setup()` so UART0 never claims GPIO1/GPIO3 before the LED buses do |
 | `wled00/json.cpp` | `serializeNetworks()` abandons a stuck WiFi connect attempt (`WiFi.disconnect(false)`) before retrying a failed scan, instead of retrying forever against a radio that is still mid-connect |
 
 If an upstream release rewrites either file, git may merge without a conflict yet drop our
@@ -49,25 +48,18 @@ conflicting; the two static divs are actually removed, with a one-line HTML comm
 their place that `tools/jts-check-patches.sh` checks for, so a future upstream rewrite of either
 file that silently reintroduces the banner is caught rather than shipped.
 
-## The C++ core files we do edit
+## The C++ core file we do edit
 
-`wled00/wled.cpp`, `JTS-FREE-UART0-PINS-START`/`-END`, off by default (`house_esp32` does not
-define `JTS_FREE_UART0_LED_PINS`; only the diagnostic `house_esp32_freepins` env does — see
-`platformio_override.ini`). Built on a real, confirmed mechanism (GPIO1/GPIO3 are UART0 TX/RX
-*and*, on the Dig-Quad pinout, WS2812 LED outputs 3/2; `Serial.begin()` claims them before the
-LED buses exist) but **confirmed on real hardware (2026-09-11) not to fix the actual LED
-symptom** — zone 3 still comes up stuck white on a clean first boot with this flag on. Left in
-place only because it is a real, harmless improvement and the diagnostic env is cheap to keep;
-it is not the active fix for the LED bug. The active fix is the platform switch below.
+**The fix for the LED bug (zone 3/GPIO1 stuck white on some outputs) was never a code change:
+it is building on an ESP-IDF 4.x platform instead of 5.x.** `house_esp32` itself now uses that
+platform (`espressif32@~6.13.0`, arduino-esp32 2.0.17 / esp-idf 4.4.7) — confirmed on real
+hardware that all 4 zones work correctly there. Two attempts to fix the same symptom in code
+while staying on IDF5 (releasing GPIO1/GPIO3 from UART0, at two different points in boot) were
+both tried and **both confirmed on real hardware not to fix it** (2026-09-11); that code has
+been reverted rather than kept as a harmless-but-useless flag, since an unused `#ifdef` in a
+core file is still merge risk for no benefit.
 
-**The actual, hardware-confirmed fix for the LED bug is not a code change at all: it is
-building on an ESP-IDF 4.x platform instead of 5.x** (`house_esp32_v4candidate` and friends,
-`platformio_override.ini`) — confirmed by Andrew on real hardware that all 4 zones work
-correctly there and do not on IDF5 no matter what pin/timing fix is tried on that side. Moving
-`house_esp32` itself to that platform, once the WiFi-scan regression below is verified fixed on
-hardware, is the plan — not yet done as of 2026-09-12.
-
-`wled00/json.cpp`, `JTS-WIFI-SCAN-FIX-START`/`-END`. IDF4 builds have a real, separate bug:
+`wled00/json.cpp`, `JTS-WIFI-SCAN-FIX-START`/`-END`. The IDF4 platform has a real, separate bug:
 `WiFi.scanNetworks()` fails permanently after any interrupted connection attempt
 (arduino-esp32 #8916 — confirmed on both the Tasmota and official espressif32 IDF4 packages;
 no later 2.0.x point release fixes it, and arduino-esp32 3.x dropped IDF4 entirely, so there is
