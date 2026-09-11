@@ -37,6 +37,7 @@
 #include <esp_transport_tcp.h>
 #include <esp_transport_ssl.h>
 #include <esp_transport_ws.h>
+#include <esp_idf_version.h>   // ESP_IDF_VERSION, for the two IDF5-only accessors below
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -89,6 +90,22 @@ void serializeNodes(JsonObject root);
 #define CL_MAX_HOST_LEN        128
 // esp_transport_ws_send_raw() writes the opcode byte verbatim; the FIN bit must be set by the caller
 #define WS_FIN(op)             ((ws_transport_opcodes_t)((op) | WS_TRANSPORT_OPCODES_FIN))
+
+// esp_transport_ws_get_fin_flag()/esp_transport_ws_get_upgrade_request_status() were added in
+// IDF5.0 (component tcp_transport, IDFGH-6767 and alongside it). IDF4.4.8's version of this same
+// component parses the FIN bit while reading a frame header and then discards it — masks the
+// opcode down to 0x0F and never stores the rest — so there is no lower-level call to fall back
+// to; the information genuinely is not available from this component on that IDF version.
+// Assuming FIN true when it cannot be read is not a guess: the only WebSocket peer CloudLink
+// ever talks to is our own cloud server, and neither of its two send call sites there
+// (hub.js sendJson/OTA chunk send) ever fragments a message — every frame it sends already is
+// a complete message. If that ever changes (the server starts streaming a message across
+// multiple frames), this assumption would need revisiting; nothing does today.
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+  #define CL_WS_FIN(ws) esp_transport_ws_get_fin_flag(ws)
+#else
+  #define CL_WS_FIN(ws) true
+#endif
 
 class CloudLinkUsermod : public Usermod {
   private:
@@ -988,7 +1005,14 @@ class CloudLinkUsermod : public Usermod {
 
       DEBUG_PRINTF_P(PSTR("CloudLink: connecting %s://%s:%u%s\n"), sTls ? "wss" : "ws", sHost.c_str(), sPort, sPath.c_str());
       if (esp_transport_connect(ws, sHost.c_str(), sPort, CL_CONNECT_TIMEOUT_MS) < 0) {
+        // Diagnostic-only: also added in IDF5.0, absent on IDF4.4.8. Losing it only means a
+        // failed handshake reports as the generic connect error below rather than the HTTP
+        // status the server rejected it with — the connection still correctly fails either way.
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
         int st = esp_transport_ws_get_upgrade_request_status(ws);
+#else
+        int st = -1;
+#endif
         if (st > 0) setError(CLE_HANDSHAKE, st);
         else setError(CLE_CONNECT, esp_transport_get_errno(ws));
         esp_transport_close(ws);
@@ -1056,7 +1080,7 @@ class CloudLinkUsermod : public Usermod {
             frameRemaining -= n;
             if (frameRemaining < 0) frameRemaining = 0;
             bool frameDone = (frameRemaining == 0);
-            bool fin = esp_transport_ws_get_fin_flag(ws);
+            bool fin = CL_WS_FIN(ws);
             switch (opcode) {
               case WS_TRANSPORT_OPCODES_CLOSE:
                 setError(CLE_CLOSED, 0);
