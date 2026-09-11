@@ -51,13 +51,21 @@ file that silently reintroduces the banner is caught rather than shipped.
 ## The C++ core file we do edit
 
 **The fix for the LED bug (zone 3/GPIO1 stuck white on some outputs) was never a code change:
-it is building on an ESP-IDF 4.x platform instead of 5.x.** `house_esp32` itself now uses that
-platform (`espressif32@~6.13.0`, arduino-esp32 2.0.17 / esp-idf 4.4.7) — confirmed on real
-hardware that all 4 zones work correctly there. Two attempts to fix the same symptom in code
-while staying on IDF5 (releasing GPIO1/GPIO3 from UART0, at two different points in boot) were
-both tried and **both confirmed on real hardware not to fix it** (2026-09-11); that code has
-been reverted rather than kept as a harmless-but-useless flag, since an unused `#ifdef` in a
-core file is still merge risk for no benefit.
+it is building on the specific ESP-IDF 4.x platform Andrew has personally confirmed on his own
+hardware — Tasmota's platform-espressif32 release 2024.06.00 (arduino-esp32 2.0.18, esp-idf
+4.4.8), `house_esp32_v4test` in `platformio_override.ini`.** That env has no CloudLink (this
+Tasmota build's precompiled libs genuinely lack `mbedtls_ssl_*`), so it's what's shipping as an
+interim "the lights work correctly" build while cloud connectivity is solved separately.
+`house_esp32` was moved to a *different* IDF4-generation platform (the official, non-Tasmota
+`espressif32@~6.13.0`, arduino-esp32 2.0.17 / esp-idf 4.4.7) on the untested assumption that any
+IDF4-generation platform would fix GPIO1 the same way — **that assumption did not hold**: Andrew
+reported the LED bug still present after flashing a build on this exact platform (2026-09-12).
+Two attempts to fix the same symptom in code while staying on IDF5 (releasing GPIO1/GPIO3 from
+UART0, at two different points in boot) were also tried and **both confirmed on real hardware
+not to fix it** (2026-09-11); that code has been reverted rather than kept as a
+harmless-but-useless flag, since an unused `#ifdef` in a core file is still merge risk for no
+benefit. `house_esp32`'s own CloudLink TLS linking and running is genuinely confirmed on real
+hardware — only its LED behavior is in question.
 
 `wled00/json.cpp`, `JTS-WIFI-SCAN-FIX-START`/`-END`. The IDF4 platform has a real, separate bug:
 `WiFi.scanNetworks()` fails permanently after any interrupted connection attempt
