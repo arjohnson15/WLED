@@ -39,6 +39,7 @@
 #include <mbedtls/md.h>
 #include <mbedtls/pkcs5.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/version.h>   // MBEDTLS_VERSION_NUMBER, for the API split below
 #include <esp_random.h>
 #include "login_page.h"
 
@@ -95,10 +96,24 @@ static bool daConstantTimeEqual(const uint8_t* a, const uint8_t* b, size_t len) 
   return diff == 0;
 }
 
+// mbedtls changed this between the two cores this fork builds against, in opposite directions:
+// IDF5.5.4's mbedtls (3.x) only has the `_ext` one-call form; IDF4.4.8's mbedtls (2.x, house's
+// diagnostic-only IDF4 test build) only has the older context-based form, which 3.x dropped
+// outright. Neither call compiles unconditionally on both, so this actually needs the guard.
 static bool daPbkdf2(const String& password, const uint8_t* salt, uint32_t iterations, uint8_t out[DA_HASH_BYTES]) {
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
   return mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256,
                                        (const unsigned char*)password.c_str(), password.length(),
                                        salt, DA_SALT_BYTES, iterations, DA_HASH_BYTES, out) == 0;
+#else
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  bool ok = mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1) == 0
+    && mbedtls_pkcs5_pbkdf2_hmac(&ctx, (const unsigned char*)password.c_str(), password.length(),
+                                  salt, DA_SALT_BYTES, iterations, DA_HASH_BYTES, out) == 0;
+  mbedtls_md_free(&ctx);
+  return ok;
+#endif
 }
 
 static void daSha256(const char* data, size_t len, uint8_t out[DA_HASH_BYTES]) {
