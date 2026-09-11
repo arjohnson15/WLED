@@ -391,7 +391,7 @@ void WLED::setup()
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detection
   #endif
 
-  #ifdef ARDUINO_ARCH_ESP32
+  #if defined(ARDUINO_ARCH_ESP32) && !defined(JTS_FREE_UART0_LED_PINS)
   gpio_pulldown_en((gpio_num_t)hardwareRX); delay(1); // suppress noise in case RX pin is floating (at low noise energy) - see issue #3128
   // note: can not use pinMode(): it routes GPIO through the GPIO matrix and detaches UART0 RX
   #endif
@@ -399,6 +399,13 @@ void WLED::setup()
   #ifdef WLED_BOOTUPDELAY
   delay(WLED_BOOTUPDELAY); // delay to let voltage stabilize, helps with boot issues on some setups
   #endif
+  // JTS-FREE-UART0-PINS-START
+  // JTS_FREE_UART0_LED_PINS: on this board GPIO1/GPIO3 (UART0 TX/RX) are also WS2812 LED
+  // outputs. Skipping Serial.begin() here means UART0 never claims those pins in the first
+  // place, so the RMT LED driver (initialized later in beginStrip(), before any usermod runs)
+  // gets clean, unclaimed pins -- releasing them afterward instead corrupted a live RMT
+  // channel and hung the main loop (confirmed on hardware 2026-09-11).
+  #ifndef JTS_FREE_UART0_LED_PINS
   Serial.begin(115200);
   #if !ARDUINO_USB_CDC_ON_BOOT
   Serial.setTimeout(50);  // this causes troubles on new MCUs that have a "virtual" USB Serial (HWCDC)
@@ -410,6 +417,8 @@ void WLED::setup()
   #if !defined(WLED_DEBUG) && defined(ARDUINO_ARCH_ESP32) && !defined(WLED_DEBUG_HOST) && ARDUINO_USB_CDC_ON_BOOT
   Serial.setDebugOutput(false); // switch off kernel messages when using USBCDC
   #endif
+  #endif // JTS_FREE_UART0_LED_PINS
+  // JTS-FREE-UART0-PINS-END
   DEBUG_PRINTLN();
   DEBUG_PRINTF_P(PSTR("---WLED %s %u INIT---\n"), versionString, VERSION);
   DEBUG_PRINTLN();
@@ -470,7 +479,7 @@ void WLED::setup()
   usePWMFixedNMI(); // link the NMI fix
 #endif
 
-#if defined(WLED_DEBUG) && !defined(WLED_DEBUG_HOST)
+#if defined(WLED_DEBUG) && !defined(WLED_DEBUG_HOST) && !defined(JTS_FREE_UART0_LED_PINS)
   PinManager::allocatePin(hardwareTX, true, PinOwner::DebugOut); // TX (GPIO1 on ESP32) reserved for debug output
 #endif
 #ifdef WLED_ENABLE_DMX //reserve GPIO2 as hardcoded DMX pin

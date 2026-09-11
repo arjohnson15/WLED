@@ -30,6 +30,7 @@ comments so they are easy to find and re-apply.
 | `wled00/data/welcome.htm` | (same file as above) the banner div and its inline style block removed too |
 | `wled00/data/common.js` | the banner's dynamic injector (runs on every settings page) disabled with an early `return` |
 | `wled00/data/index.css` | `--dbh` (banner height) set to `0px` so nothing that positions off it leaves a gap |
+| `wled00/wled.cpp` | `JTS_FREE_UART0_LED_PINS` (off by default) skips `Serial.begin()`/the RX pulldown in `WLED::setup()` so UART0 never claims GPIO1/GPIO3 before the LED buses do |
 
 If an upstream release rewrites either file, git may merge without a conflict yet drop our
 block. That is exactly what the check script catches.
@@ -47,11 +48,25 @@ conflicting; the two static divs are actually removed, with a one-line HTML comm
 their place that `tools/jts-check-patches.sh` checks for, so a future upstream rewrite of either
 file that silently reintroduces the banner is caught rather than shipped.
 
-## Deliberately not changed
+## The one C++ core file we do edit
 
-No C++ core file is touched. DirectAuth works because usermod `setup()` runs before
-`initServer()`, so its handler is first in the chain; CloudLink calls WLED's own
-serializers. That is why the merge surface stays this small — keep it that way.
+`wled00/wled.cpp`, wrapped in `JTS-FREE-UART0-PINS-START`/`-END` comments, off by default
+(`house_esp32` does not define `JTS_FREE_UART0_LED_PINS`; only the diagnostic
+`house_esp32_freepins` env does — see `platformio_override.ini`). GPIO1/GPIO3 double as UART0
+TX/RX and, on the Dig-Quad pinout, as WS2812 LED outputs 3/2. `Serial.begin()` in
+`WLED::setup()` claims both pins for UART0 before the LED buses exist; a usermod cannot get in
+ahead of that, because `beginStrip()` (which creates the RMT LED driver) runs *before*
+`UsermodManager::setup()`, not after — an earlier attempt released the pins from a usermod's
+`setup()` and it corrupted a live RMT channel and hung the main loop on real hardware
+(2026-09-11). Skipping `Serial.begin()` outright, ahead of `beginStrip()`, is the only point
+early enough to leave the pins unclaimed instead of un-claiming them, and needs a change to
+`wled.cpp` itself. `DEBUG_PRINT*` macros before that point are confirmed to compile to nothing
+without `WLED_DEBUG`, so nothing else in this window depends on `Serial` already being open.
+
+DirectAuth and CloudLink otherwise need no core edits: DirectAuth works because usermod
+`setup()` runs before `initServer()`, so its handler is first in the chain; CloudLink calls
+WLED's own serializers. That is why the merge surface otherwise stays this small — keep it
+that way.
 
 ## After a merge
 

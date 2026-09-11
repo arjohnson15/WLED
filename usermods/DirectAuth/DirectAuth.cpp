@@ -43,10 +43,6 @@
 #include <esp_random.h>
 #include "login_page.h"
 
-#ifdef JTS_FREE_UART0_LED_PINS
-#include <driver/gpio.h>
-#endif
-
 #define DA_MAX_SESSIONS       8
 #define DA_TOKEN_BYTES        32
 #define DA_TOKEN_HEX_LEN      (DA_TOKEN_BYTES * 2)
@@ -606,21 +602,11 @@ class DirectAuthUsermod : public Usermod {
 
     // ---- Usermod API ----
     void setup() override {
-#ifdef JTS_FREE_UART0_LED_PINS
-      // GPIO1/GPIO3 are the ESP32's UART0 TX/RX pins, and Serial.begin() in wled.cpp
-      // wires them there unconditionally at boot -- before any usermod or LED bus exists.
-      // On the Dig-Quad pinout those are LED outputs 3 and 2 (WS2812 via RMT); IDF5's
-      // GPIO driver tracks which peripheral owns a pin, and the RMT channel created later
-      // in strip.finalizeInit() can fail to properly claim a pin UART0 still holds,
-      // corrupting that output's timing-sensitive data line. This has already been an
-      // accepted limitation of this pinout (serial debug output was known unusable with
-      // LED2/LED3 configured) -- this just also releases the pin so LED output can have it.
-      // UsermodManager::setup() runs before strip.finalizeInit() in WLED::setup(), so this
-      // happens before the LED buses are ever created.
-      Serial.end();
-      gpio_reset_pin(GPIO_NUM_1);
-      gpio_reset_pin(GPIO_NUM_3);
-#endif
+      // JTS_FREE_UART0_LED_PINS itself is handled in wled.cpp, ahead of beginStrip():
+      // by the time any usermod's setup() runs, strip.finalizeInit() has already created
+      // the LED buses. Releasing GPIO1/GPIO3 from here (as an earlier version of this did)
+      // reset pins RMT was already actively driving and hung the main loop on real hardware
+      // (confirmed 2026-09-11) -- too late to be safe.
       loadCredentials();
       loadSessions();
       // Registered from setup(), which WLED runs before initServer(): this handler
