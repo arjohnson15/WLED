@@ -17,8 +17,8 @@ automated upstream sync, and refuses to push a sync that loses any of it.
 
 ## Core files we do edit (the only merge risk)
 
-Both are web UI sources, and both changes are wrapped in `JTS-…-START` / `JTS-…-END`
-comments so they are easy to find and re-apply.
+Each change is wrapped in `JTS-…-START` / `JTS-…-END` comments so it is easy to find and
+re-apply if an upstream merge drops it.
 
 | File | Change |
 |---|---|
@@ -31,6 +31,7 @@ comments so they are easy to find and re-apply.
 | `wled00/data/common.js` | the banner's dynamic injector (runs on every settings page) disabled with an early `return` |
 | `wled00/data/index.css` | `--dbh` (banner height) set to `0px` so nothing that positions off it leaves a gap |
 | `wled00/wled.cpp` | `JTS_FREE_UART0_LED_PINS` (off by default) skips `Serial.begin()`/the RX pulldown in `WLED::setup()` so UART0 never claims GPIO1/GPIO3 before the LED buses do |
+| `wled00/json.cpp` | `serializeNetworks()` abandons a stuck WiFi connect attempt (`WiFi.disconnect(false)`) before retrying a failed scan, instead of retrying forever against a radio that is still mid-connect |
 
 If an upstream release rewrites either file, git may merge without a conflict yet drop our
 block. That is exactly what the check script catches.
@@ -48,20 +49,38 @@ conflicting; the two static divs are actually removed, with a one-line HTML comm
 their place that `tools/jts-check-patches.sh` checks for, so a future upstream rewrite of either
 file that silently reintroduces the banner is caught rather than shipped.
 
-## The one C++ core file we do edit
+## The C++ core files we do edit
 
-`wled00/wled.cpp`, wrapped in `JTS-FREE-UART0-PINS-START`/`-END` comments, off by default
-(`house_esp32` does not define `JTS_FREE_UART0_LED_PINS`; only the diagnostic
-`house_esp32_freepins` env does — see `platformio_override.ini`). GPIO1/GPIO3 double as UART0
-TX/RX and, on the Dig-Quad pinout, as WS2812 LED outputs 3/2. `Serial.begin()` in
-`WLED::setup()` claims both pins for UART0 before the LED buses exist; a usermod cannot get in
-ahead of that, because `beginStrip()` (which creates the RMT LED driver) runs *before*
-`UsermodManager::setup()`, not after — an earlier attempt released the pins from a usermod's
-`setup()` and it corrupted a live RMT channel and hung the main loop on real hardware
-(2026-09-11). Skipping `Serial.begin()` outright, ahead of `beginStrip()`, is the only point
-early enough to leave the pins unclaimed instead of un-claiming them, and needs a change to
-`wled.cpp` itself. `DEBUG_PRINT*` macros before that point are confirmed to compile to nothing
-without `WLED_DEBUG`, so nothing else in this window depends on `Serial` already being open.
+`wled00/wled.cpp`, `JTS-FREE-UART0-PINS-START`/`-END`, off by default (`house_esp32` does not
+define `JTS_FREE_UART0_LED_PINS`; only the diagnostic `house_esp32_freepins` env does — see
+`platformio_override.ini`). Built on a real, confirmed mechanism (GPIO1/GPIO3 are UART0 TX/RX
+*and*, on the Dig-Quad pinout, WS2812 LED outputs 3/2; `Serial.begin()` claims them before the
+LED buses exist) but **confirmed on real hardware (2026-09-11) not to fix the actual LED
+symptom** — zone 3 still comes up stuck white on a clean first boot with this flag on. Left in
+place only because it is a real, harmless improvement and the diagnostic env is cheap to keep;
+it is not the active fix for the LED bug. The active fix is the platform switch below.
+
+**The actual, hardware-confirmed fix for the LED bug is not a code change at all: it is
+building on an ESP-IDF 4.x platform instead of 5.x** (`house_esp32_v4candidate` and friends,
+`platformio_override.ini`) — confirmed by Andrew on real hardware that all 4 zones work
+correctly there and do not on IDF5 no matter what pin/timing fix is tried on that side. Moving
+`house_esp32` itself to that platform, once the WiFi-scan regression below is verified fixed on
+hardware, is the plan — not yet done as of 2026-09-12.
+
+`wled00/json.cpp`, `JTS-WIFI-SCAN-FIX-START`/`-END`. IDF4 builds have a real, separate bug:
+`WiFi.scanNetworks()` fails permanently after any interrupted connection attempt
+(arduino-esp32 #8916 — confirmed on both the Tasmota and official espressif32 IDF4 packages;
+no later 2.0.x point release fixes it, and arduino-esp32 3.x dropped IDF4 entirely, so there is
+no version bump that makes this go away). `serializeNetworks()` retried the scan forever
+without ever addressing why it failed: the STA radio sits in ESP-IDF's "still connecting" state
+for most of the 18s (or 300s with an AP client attached) between `WLED::handleConnection()`'s
+own reconnect attempts, and a scan issued in that window collides with it. The fix abandons a
+stuck connect attempt (`WiFi.disconnect(false)`) before retrying the scan, guarded on
+`WiFi.status() != WL_CONNECTED` so a genuinely good link is never dropped just because a scan
+failed — `handleConnection()` re-fires the connection on its normal schedule regardless, so a
+delayed connect is retried, not lost. Applied unconditionally (not behind a build flag): the
+same driver behavior exists in arduino-esp32 3.x too, so this is a safe improvement on IDF5
+builds as well, not just the IDF4 path it was written for.
 
 DirectAuth and CloudLink otherwise need no core edits: DirectAuth works because usermod
 `setup()` runs before `initServer()`, so its handler is first in the chain; CloudLink calls

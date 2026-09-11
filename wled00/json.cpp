@@ -1066,6 +1066,18 @@ void serializeNetworks(JsonObject root)
       #if defined(SOC_WIFI_SUPPORT_5G) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 2))
       if (!WiFi.setBandMode(wifi_band_mode_t(wifiBandMode))) { DEBUG_PRINTLN(F("serializeNetworks(): WiFi band configuration failed!")); }
       #endif
+      // JTS-WIFI-SCAN-FIX-START
+      // A scan collides with a connection attempt still in progress in the IDF's own WiFi
+      // driver (esp_wifi_scan_start() returns this generic failure while STA is mid-connect,
+      // arduino-esp32 #8916) -- retrying the scan alone never resolves it, because nothing
+      // ever gives up on the stuck connect attempt in between. WLED's own reconnect timer
+      // (handleConnection()) only forces a fresh WiFi.disconnect()+begin() cycle every 18s (or
+      // 300s with an AP client attached), so the radio can sit "still connecting" for nearly
+      // that whole window. Abandon a pending attempt before retrying, but only when there is no
+      // good link to lose -- handleConnection() already re-fires the connection on its normal
+      // schedule, so a delayed connect is retried, not dropped.
+      if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false);
+      // JTS-WIFI-SCAN-FIX-END
       WiFi.scanNetworks(true);
       return;
     case WIFI_SCAN_RUNNING:
@@ -1084,6 +1096,7 @@ void serializeNetworks(JsonObject root)
   WiFi.scanDelete();
 
   if (WiFi.scanComplete() == WIFI_SCAN_FAILED) {
+    if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false); // see JTS-WIFI-SCAN-FIX above
     WiFi.scanNetworks(true);
   }
 }
