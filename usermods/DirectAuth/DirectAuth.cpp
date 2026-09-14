@@ -591,7 +591,12 @@ class DirectAuthUsermod : public Usermod {
       if (!hasCreds && apActive) {
         const String& u = request->url();
         if (u == "/" || u == "/welcome" || u == "/settings" || u == "/settings/wifi"
-            || u == "/settings/s.js" || u == "/json/net" || u == "/skin.css") return false;
+            || u == "/settings/s.js" || u == "/json/net") return false;
+        // The settings pages pull common.js and style.css at runtime with relative URLs
+        // (so they arrive as /settings/common.js etc. and WLED serves them by suffix);
+        // without them the WiFi page renders as a blank white screen -- verified in a
+        // real browser, 2026-09-14. skin.css is optional but requested the same way.
+        if (u.endsWith(F("/common.js")) || u.endsWith(F("/style.css")) || u.endsWith(F("/skin.css"))) return false;
       }
       if (!hasCreds) return true;
       return !isAuthenticated(request);
