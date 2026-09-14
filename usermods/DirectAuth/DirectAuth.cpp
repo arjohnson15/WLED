@@ -591,7 +591,10 @@ class DirectAuthUsermod : public Usermod {
       if (!hasCreds && apActive) {
         const String& u = request->url();
         if (u == "/" || u == "/welcome" || u == "/settings" || u == "/settings/wifi"
-            || u == "/settings/s.js" || u == "/json/net") return false;
+            || u == "/settings/s.js" || u == "/json/net"
+            // the WiFi page's cloud section: the pairing code is entered here, before the
+            // WiFi save, and must be storable before any login exists
+            || u == "/cloud/status" || u == "/cloud/pair") return false;
         // The settings pages pull common.js and style.css at runtime with relative URLs
         // (so they arrive as /settings/common.js etc. and WLED serves them by suffix);
         // without them the WiFi page renders as a blank white screen -- verified in a
