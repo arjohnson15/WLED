@@ -594,7 +594,11 @@ class DirectAuthUsermod : public Usermod {
             || u == "/settings/s.js" || u == "/json/net"
             // the WiFi page's cloud section: the pairing code is entered here, before the
             // WiFi save, and must be storable before any login exists
-            || u == "/cloud/status" || u == "/cloud/pair") return false;
+            || u == "/cloud/status" || u == "/cloud/pair"
+            // read-only status while on the setup AP, so a failed join can be diagnosed from the
+            // board itself (uptime = is it resetting; nw.ins[0].ssid = did the save land; wifi
+            // rssi/bssid). Stock WLED serves all of these on its open setup AP anyway.
+            || (request->method() == HTTP_GET && (u == "/json" || u == "/json/info" || u == "/json/si" || u == "/json/cfg"))) return false;
         // The settings pages pull common.js and style.css at runtime with relative URLs
         // (so they arrive as /settings/common.js etc. and WLED serves them by suffix);
         // without them the WiFi page renders as a blank white screen -- verified in a
