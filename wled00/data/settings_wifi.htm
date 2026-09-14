@@ -155,7 +155,46 @@ Static subnet mask:<br>
 			loadJS(getURL('/settings/s.js?p=1'), false);	// If we set async false, file is loaded and executed, then next statement is processed
 			if (loc) d.Sf.action = getURL('/settings/wifi');
 			setTimeout(tE, 500); // wait for DOM to load before calling tE()
+			clInit();
 		}
+
+		// ---- JTS-CLOUD-JS-START: cloud link (CloudLink usermod: GET /cloud/status, POST /cloud/pair) ----
+		const CL_DEFAULT_HOST = 'wled.cloudjohnson.com';
+		function clInit() {
+			// type the code however you like: case, spaces and the dash are all optional
+			gId('clc').addEventListener('input', function () {
+				const v = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+				this.value = v.length > 4 ? v.slice(0, 4) + '-' + v.slice(4) : v;
+			});
+			fetch(getURL('/cloud/status'), {cache:'no-store'}).then(r=>r.json()).then(s=>{
+				if (s.host) gId('clh').value = s.host;
+				else if (!gId('clh').value) gId('clh').value = CL_DEFAULT_HOST;
+				gId('clt').checked = s.tls !== false;
+				gId('clst').innerHTML = s.paired ? ('Linked as <b>'+s.deviceId+'</b>'+(s.connected?' &mdash; connected':' &mdash; offline'))
+					: (s.pairing ? 'Code saved &mdash; this controller will link itself once it joins your WiFi.' : 'Not linked.');
+			}).catch(()=>{gId('clst').textContent = 'Cloud usermod not available.';});
+		}
+		// posts the code; returns a promise that resolves whether or not it worked
+		function clSend() {
+			const code = gId('clc').value.trim();
+			if (!code) return Promise.resolve(true);
+			const host = gId('clh').value.trim() || CL_DEFAULT_HOST;
+			const body = new URLSearchParams({code: code, host: host, tls: gId('clt').checked ? 'true' : 'false', port: gId('clt').checked ? '443' : '8787'});
+			return fetch(getURL('/cloud/pair'), {method:'POST', body: body})
+				.then(r=>r.json().then(j=>({ok:r.ok, j:j})))
+				.then(r=>{ gId('clmsg').innerHTML = r.ok ? ' <b style="color:#0b0">saved &mdash; will link after WiFi connects</b>' : (' <b style="color:#b00">'+(r.j.error||'failed')+'</b>'); return r.ok; })
+				.catch(()=>{ gId('clmsg').innerHTML = ' <b style="color:#b00">request failed</b>'; return false; });
+		}
+		function clLink() { gId('clmsg').textContent = ' working...'; clSend().then(ok=>{ if (ok) clInit(); }); }
+		// store the pairing code before the WiFi save reboots the controller
+		var clDone = false;
+		function clOnSubmit(e) {
+			if (clDone || !gId('clc').value.trim()) return true;
+			e.preventDefault();
+			clSend().then(()=>{ clDone = true; d.Sf.submit(); });
+			return false;
+		}
+		// ---- JTS-CLOUD-JS-END ----
 
 		var rC = 0; // remote count
 		// toggle visibility of ESP-NOW remote list based on checkbox state
@@ -206,7 +245,7 @@ Static subnet mask:<br>
 	</script>
 </head>
 <body>
-<form id="form_s" name="Sf" method="post">
+<form id="form_s" name="Sf" method="post" onsubmit="return clOnSubmit(event)">
 	<div class="toprow">
 	<div class="helpB"><button type="button" onclick="H('features/settings/#wifi-settings')">?</button></div>
 	<button type="button" onclick="B()">Back</button><button type="submit">Save & Connect</button><hr>
@@ -222,6 +261,18 @@ Static subnet mask:<br>
 			<button type="button" id="wifi_rem" onclick="remWiFi()">-</button><br>
 		</div>
 	</div>
+	<!-- JTS-CLOUD-SECTION-START (see tools/jts-check-patches.sh) -->
+	<div class="sec">
+		<h3>JTS Lights cloud</h3>
+		<span id="clst" class="mut">Not linked.</span><br><br>
+		Cloud server:<br><input type="text" id="clh" maxlength="128" value="wled.cloudjohnson.com"><br>
+		Pairing code (from your cloud account):<br><input type="text" id="clc" maxlength="9" placeholder="XXXXXXXX" autocapitalize="characters" autocomplete="off" spellcheck="false"><br>
+		<label><input type="checkbox" id="clt" checked> Use TLS (leave on for a hostname, off for a LAN IP)</label><br><br>
+		<button type="button" onclick="clLink()">Link now</button>
+		<span id="clmsg"></span><br>
+		<i>Enter the code here during setup: it is stored and used as soon as this controller joins your WiFi. The dash is optional.</i>
+	</div>
+	<!-- JTS-CLOUD-SECTION-END -->
 	<div class="sec" id="ethd">
 		<h3>Ethernet Type</h3>
 		<select name="ETH">

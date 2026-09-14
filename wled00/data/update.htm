@@ -145,7 +145,31 @@
 		</span>
 		</p>
 		<hr class="sml">
-		<h3>Manual upload</h3>
+		<!-- JTS-CLOUD-UPDATE-START (see tools/jts-check-patches.sh) -->
+<div id="jtsCloud" style="margin:10px 0">
+	<button type="button" onclick="jtsCloudUpdate()">Update from JTS Lights cloud</button>
+	<div id="jtsMsg" style="margin-top:6px;font-size:14px;color:#aaa">Checking cloud link&hellip;</div>
+</div>
+<script>
+function jtsCloudInit() {
+	fetch('/cloud/status', {cache:'no-store'}).then(r=>r.json()).then(s=>{
+		const m = document.getElementById('jtsMsg');
+		if (!s.paired) { m.textContent = 'Not linked to the cloud - use Manual upload, or link this controller first.'; document.querySelector('#jtsCloud button').disabled = true; }
+		else if (!s.connected) m.textContent = 'Linked as ' + s.deviceId + ', but not connected right now.';
+		else m.textContent = 'Linked as ' + s.deviceId + '. The cloud installs the newest build for you.';
+	}).catch(()=>{ document.getElementById('jtsCloud').style.display='none'; });
+}
+function jtsCloudUpdate() {
+	const m = document.getElementById('jtsMsg');
+	m.textContent = 'Asking the cloud for the newest build...';
+	fetch('/cloud/update', {method:'POST'}).then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(r=>{
+		m.textContent = r.ok ? 'Update requested. If a newer build exists it installs now and the controller reboots on its own.' : ('Failed: ' + (r.j.error || 'unknown'));
+	}).catch(()=>{ m.textContent = 'Request failed.'; });
+}
+jtsCloudInit();
+</script>
+<!-- JTS-CLOUD-UPDATE-END -->
+<h3>Manual upload</h3>
 		<input type="hidden" name="skipValidation" value="" id="sV">
 		<input type='file' name='update' required><br> <!--should have accept='.bin', but it prevents file upload from android app-->
 		<input type='checkbox' onchange="sV.value=checked?1:''" id="skipValidation">

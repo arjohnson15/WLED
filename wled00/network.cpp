@@ -421,7 +421,12 @@ void WiFiEvent(WiFiEvent_t event)
   switch (event) {
     case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
       // AP client disconnected
-      if (--apClients == 0 && isWiFiConfigured()) forceReconnect = true; // no clients reconnect WiFi if awailable
+      // JTS-APCLIENTS-FIX-START (upstream main fixed this the same way: apClients is unsigned and an
+      // unmatched disconnect event underflowed it to 255, after which "no clients left" was never
+      // true again and the board never re-attempted the STA connection from its setup AP)
+      if (apClients > 0) apClients--;
+      if (apClients == 0 && isWiFiConfigured()) forceReconnect = true; // no clients reconnect WiFi if awailable
+      // JTS-APCLIENTS-FIX-END
       DEBUG_PRINTF_P(PSTR("WiFi-E: AP Client Disconnected (%d) @ %lus.\n"), (int)apClients, millis()/1000);
       break;
     case ARDUINO_EVENT_WIFI_AP_STACONNECTED:

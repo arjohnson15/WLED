@@ -180,6 +180,7 @@
 //				d.Sf.querySelectorAll("#mLC input[name^=LA]").forEach((e)=>{e.min = 0; e.value = 0;}); // set min & value to 0
 			}
 			UI();
+			jtsFillBoards();
 		}
 		// enable per port limiter and calculate current
 		function enPPL(sDI=0)
@@ -1033,6 +1034,16 @@ Swap: <select id="xw${s}" name="XW${s}">
 				multiple power injection points and a fuse!<br>
 			</div>
 		</div>
+		<!-- JTS-BOARD-PICKER-START (see tools/jts-check-patches.sh) -->
+		<div class="sect" style="margin-bottom:10px">
+			<h3>Controller board</h3>
+			Pick your board to fill in the data, button and relay pins:<br>
+			<select id="jtsBoard" onchange="jtsApplyBoard()" style="max-width:280px">
+				<option value="">-- choose --</option>
+			</select>
+			<div id="jtsBoardNote" style="font-size:13px;color:#aaa;margin-top:6px"></div>
+		</div>
+		<!-- JTS-BOARD-PICKER-END -->
 		<div id="mLC"><h4>LED outputs:</h4></div>
 		<hr class="sml">
 		<button type="button" id="+" onclick="addLEDs(1,false)">+</button>
@@ -1166,5 +1177,36 @@ Swap: <select id="xw${s}" name="XW${s}">
 	<button type="button" onclick="B()">Back</button><button type="submit">Save</button>
 </form>
 <div id="toast"></div>
+
+	<!-- JTS-BOARD-JS-START -->
+	<script>
+		// Known boards, so nobody has to look up which GPIO the relay is on.
+		// Pins come from the manufacturers' own pinout guides.
+		var JTS_BOARDS = [
+			{id:"dig-uno",  n:"QuinLED Dig-Uno (v2/v3)",      leds:[16,3],            btn:0,  rly:15, note:"Relay is the Q1 output. LED2 uses the serial TX pin."},
+			{id:"dig-quad", n:"QuinLED Dig-Quad (v2/v3)",     leds:[16,3,1,4],        btn:0,  rly:15, note:"Relay (Q1R) is fitted on pre-assembled boards only. LED2/LED3 use the serial pins."},
+			{id:"dig-octa", n:"QuinLED Dig-Octa Brainboard",  leds:[0,1,2,3,4,5,12,13], btn:34, rly:33, note:"Output 8 shares a pin with I2C. Ethernet uses GPIO17-27."},
+			{id:"athom",    n:"Athom WLED ESP32",             leds:[5],               btn:0,  rly:-1, note:"Some Athom models use GPIO33 or GPIO18 instead."},
+			{id:"esp32",    n:"Generic ESP32",                leds:[16],              btn:0,  rly:12, note:"Avoid GPIO6-11 (flash) and 34-39 (input only)."},
+			{id:"esp8266",  n:"Generic ESP8266 (D1 mini)",    leds:[2],               btn:0,  rly:12, note:"Data is effectively fixed at GPIO2 (D4)."}
+		];
+		function jtsFillBoards() {
+			var sel = gId("jtsBoard"); if (!sel) return;
+			JTS_BOARDS.forEach(function(b){ var o = document.createElement("option"); o.value = b.id; o.textContent = b.n; sel.appendChild(o); });
+		}
+		function jtsApplyBoard() {
+			var b = JTS_BOARDS.find(function(x){ return x.id === gId("jtsBoard").value; });
+			if (!b) { gId("jtsBoardNote").textContent = ""; return; }
+			// make sure there are enough outputs, then set each data pin
+			var have = d.Sf.querySelectorAll("[name^=L0]").length;
+			if (have < b.leds.length) addLEDs(b.leds.length - have, false);
+			b.leds.forEach(function(pin, i){ var f = d.Sf["L0" + i]; if (f) { f.value = pin; } });
+			if (d.Sf.BT0) d.Sf.BT0.value = b.btn;
+			if (d.Sf.RL) d.Sf.RL.value = b.rly;
+			gId("jtsBoardNote").textContent = b.note + " Check the LED counts, then Save.";
+			UI();
+		}
+	</script>
+	<!-- JTS-BOARD-JS-END -->
 </body>
 </html>

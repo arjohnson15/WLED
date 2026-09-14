@@ -1,0 +1,5 @@
+{
+  "name": "CloudLink",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}
