@@ -772,6 +772,10 @@ void serveSettings(AsyncWebServerRequest* request, bool post) {
 
   if (post) { //settings/set POST request, saving
     IPAddress client = request->client()->remoteIP();
+    // JTS-WIFI-JOIN-DIAG-START: temporary, remove once the setup-save mystery is nailed down
+    DEBUG_PRINTF_P(PSTR("settings POST: subPage=%u client=%s apActive=%d inLocalSubnet=%d\n"),
+      (unsigned)subPage, client.toString().c_str(), (int)apActive, (int)inLocalSubnet(client));
+    // JTS-WIFI-JOIN-DIAG-END
     if (!inLocalSubnet(client)) { // includes same subnet check
       serveMessage(request, 401, FPSTR(s_accessdenied), FPSTR(s_redirecting), 123);
       return;

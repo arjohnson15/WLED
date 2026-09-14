@@ -728,7 +728,13 @@ const char DirectAuthUsermod::_name[]    PROGMEM = "DirectAuth";
 const char DirectAuthUsermod::_enabled[] PROGMEM = "enabled";
 
 bool DirectAuthGate::canHandle(AsyncWebServerRequest* request) {
-  if (!um->shouldBlock(request)) return false;
+  bool blocked = um->shouldBlock(request);
+  // JTS-WIFI-JOIN-DIAG-START: temporary, remove once the setup-save mystery is nailed down
+  if (request->method() == HTTP_POST) {
+    DEBUG_PRINTF_P(PSTR("DirectAuth: POST %s -> %s\n"), request->url().c_str(), blocked ? "BLOCKED" : "allowed");
+  }
+  // JTS-WIFI-JOIN-DIAG-END
+  if (!blocked) return false;
   request->addInterestingHeader(F("Accept"));   // needed in handleRequest; other headers are dropped after attach
   return true;
 }

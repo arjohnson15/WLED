@@ -128,6 +128,10 @@ void handleSettingsSet(AsyncWebServerRequest *request, byte subPage)
     bool oldESPNow = enableESPNow;
     enableESPNow = request->hasArg(F("RE"));
     if (oldESPNow != enableESPNow) forceReconnect = true;
+    // JTS-WIFI-JOIN-DIAG-START: temporary, remove once the setup-save mystery is nailed down
+    DEBUG_PRINTF_P(PSTR("WiFi settings saved: SSID0='%s' forceReconnect=%d\n"),
+      multiWiFi.size() ? multiWiFi[0].clientSSID : "", (int)forceReconnect);
+    // JTS-WIFI-JOIN-DIAG-END
     linked_remotes.clear();  // clear old remotes
     for (size_t n = 0; n < 10; n++) {
       char rm[4];
