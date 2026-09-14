@@ -581,6 +581,18 @@ class DirectAuthUsermod : public Usermod {
       }
       if (isPublicPath(request->url())) return false;
       loadCredentials();
+      // First-time setup: the board is on its setup AP and nobody has created a login yet.
+      // WLED's own WiFi setup lives at http://4.3.2.1/settings/wifi -- an IP host, so the
+      // name-based carve-out above does not apply -- and its Save is a POST that the rule
+      // below would answer with a 401, so the credentials were never written, the board
+      // rebooted with nothing and came straight back as WLED-AP. Every build with this
+      // usermod failed first-time WiFi setup that way; QuinLED's stock firmware, without it,
+      // never did (2026-09-14). Only while the setup AP is up, only the WiFi setup surface.
+      if (!hasCreds && apActive) {
+        const String& u = request->url();
+        if (u == "/" || u == "/welcome" || u == "/settings" || u == "/settings/wifi"
+            || u == "/settings/s.js" || u == "/json/net" || u == "/skin.css") return false;
+      }
       if (!hasCreds) return true;
       return !isAuthenticated(request);
     }
