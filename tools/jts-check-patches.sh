@@ -39,8 +39,6 @@ check "cloud update markup end"   wled00/data/update.htm               "JTS-CLOU
 check "board picker on LED page"  wled00/data/settings_leds.htm        "JTS-BOARD-PICKER-START"
 check "board picker script"       wled00/data/settings_leds.htm        "JTS-BOARD-JS-START"
 check "board picker is called"    wled00/data/settings_leds.htm        "jtsFillBoards()"
-check "WiFi scan fix (start)"       wled00/json.cpp                    "JTS-WIFI-SCAN-FIX-START"
-check "WiFi scan fix (end)"         wled00/json.cpp                    "JTS-WIFI-SCAN-FIX-END"
 check "AP client count fix (start)" wled00/network.cpp                 "JTS-APCLIENTS-FIX-START"
 check "AP client count fix (end)"   wled00/network.cpp                 "JTS-APCLIENTS-FIX-END"
 check "first-time setup through the gate" usermods/DirectAuth/DirectAuth.cpp "!hasCreds && apActive"

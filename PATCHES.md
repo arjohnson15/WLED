@@ -33,7 +33,6 @@ re-apply if an upstream merge drops it.
 | `wled00/data/settings_wifi.htm` | the "JTS Lights cloud" section (server, pairing code, TLS) plus its script, and `onsubmit="return clOnSubmit(event)"` on the form |
 | `wled00/data/update.htm` | an "Update from JTS Lights cloud" button above Manual upload, which asks the cloud to push the newest build |
 | `wled00/data/settings_leds.htm` | a "Controller board" picker that fills in the data, button and relay pins for known boards |
-| `wled00/json.cpp` | `serializeNetworks()` abandons a stuck WiFi connect attempt (`WiFi.disconnect(false)`) before retrying a failed scan, instead of retrying forever against a radio that is still mid-connect |
 | `wled00/network.cpp` | `WiFiEvent()` `AP_STADISCONNECTED`: `apClients` is decremented only when above zero, so an unmatched disconnect can no longer underflow it to 255 and stop the board ever re-attempting its STA connection |
 
 If an upstream release rewrites any of these, git may merge without a conflict yet drop our
@@ -109,3 +108,14 @@ git -C firmware merge v16.x.y            # the next release tag, not upstream/ma
 npm ci && npm run build                  # regenerate the web UI headers
 pio run -e house_esp32                   # must fit the 1.8 MB slot (see platformio_override.ini)
 ```
+
+## Removed on purpose: the `json.cpp` WiFi-scan patch (2026-09-14)
+
+`serializeNetworks()` briefly carried a `WiFi.disconnect(false)` before retrying a failed scan.
+It was written for "scan stays broken after a failed first-time WiFi setup" — whose real cause
+was DirectAuth's gate 401-ing the setup Save (fixed in the usermod). On an unconfigured board the
+WiFi settings page scans as soon as it opens, and that disconnect() can raise a station-
+disconnected event that 16.0.1's `WiFiEvent()` answers with a full driver teardown
+(`WiFi.mode(WIFI_MODE_NULL)` in `initConnection()`), dropping the setup AP and the phone with it.
+The WiFi path of this fork is now byte-identical to stock 16.0.1 plus upstream's `apClients`
+fix; keep it that way.
