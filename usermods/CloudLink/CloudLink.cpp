@@ -140,6 +140,10 @@ class CloudLinkUsermod : public Usermod {
     enum ErrCode : uint8_t { CLE_NONE, CLE_TRANSPORT_INIT, CLE_WS_INIT, CLE_HANDSHAKE, CLE_CONNECT, CLE_WRITE, CLE_SOCKET, CLE_READ, CLE_LOST, CLE_CLOSED, CLE_PONG, CLE_SERVER, CLE_QUEUE_FULL };
     volatile uint8_t lastErrCode   = CLE_NONE;
     volatile int     lastErrDetail = 0;         // errno, HTTP status or server error index
+    // JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
+    volatile int     lastTlsCode   = 0;         // mbedtls error code from the last TLS connect attempt, if any
+    volatile int     lastTlsFlags  = 0;         // mbedtls X.509 verify flags from the same attempt
+    // JTS-CLOUDLINK-TLS-DIAG-END
     static const char* const serverErrors[];    // server error codes we know, indexed for lastErrDetail
     unsigned long lastConnectMs      = 0;
     unsigned long lastDisconnectMs   = 0;
@@ -170,6 +174,12 @@ class CloudLinkUsermod : public Usermod {
       if (c == CLE_HANDSHAKE) t += d;
       else if (c == CLE_SERVER) t += (d >= 0 && d < 6) ? serverErrors[d] : "unknown";
       else if (d) { t += F(" (errno "); t += d; t += ')'; }
+      // JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
+      if (c == CLE_CONNECT && (lastTlsCode || lastTlsFlags)) {
+        t += F(" [tls -0x"); t += String(-lastTlsCode, 16);
+        t += F(" flags 0x"); t += String(lastTlsFlags, 16); t += ']';
+      }
+      // JTS-CLOUDLINK-TLS-DIAG-END
       return t;
     }
 
@@ -1015,6 +1025,14 @@ class CloudLinkUsermod : public Usermod {
 #endif
         if (st > 0) setError(CLE_HANDSHAKE, st);
         else setError(CLE_CONNECT, esp_transport_get_errno(ws));
+        // JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
+        if (sTls) {
+          esp_tls_error_handle_t eh = esp_transport_get_error_handle(base);
+          int tlsCode = 0, tlsFlags = 0;
+          if (eh) esp_tls_get_and_clear_last_error(eh, &tlsCode, &tlsFlags);
+          lastTlsCode = tlsCode; lastTlsFlags = tlsFlags;
+        }
+        // JTS-CLOUDLINK-TLS-DIAG-END
         esp_transport_close(ws);
         esp_transport_destroy(ws);
         esp_transport_destroy(base);
