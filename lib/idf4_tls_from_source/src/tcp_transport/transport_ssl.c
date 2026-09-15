@@ -54,14 +54,20 @@ static inline transport_esp_tls_t *ssl_get_context_data(esp_transport_handle_t t
 }
 
 // JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
-// Declared (extern "C") directly in usermods/CloudLink/CloudLink.cpp, the only caller -- no
-// shared header, since cross-library include paths are not reliable in PlatformIO's LDF.
-void jts_tls_dump_peer_cert(esp_transport_handle_t t, char *buf, size_t len)
+// Public getter declared (extern "C") directly in usermods/CloudLink/CloudLink.cpp, the only
+// caller -- no shared header, since cross-library include paths are not reliable in PlatformIO's
+// LDF. Captured into this static buffer by capture_peer_cert_info() below, called from
+// ssl_connect()'s failure path BEFORE esp_tls_conn_destroy() frees the ssl context -- a caller
+// reading the transport handle afterward (as an earlier version of this diagnostic did) always
+// saw "(no tls context)" because destroy already ran by the time CloudLink.cpp got control back.
+static char s_lastPeerCertInfo[160] = {0};
+
+static void capture_peer_cert_info(mbedtls_ssl_context *ssl_ctx)
 {
+    char *buf = s_lastPeerCertInfo;
+    size_t len = sizeof(s_lastPeerCertInfo);
     buf[0] = '\0';
-    transport_esp_tls_t *ssl = ssl_get_context_data(t);
-    if (!ssl || !ssl->tls) { snprintf(buf, len, "(no tls context)"); return; }
-    const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&ssl->tls->ssl);
+    const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(ssl_ctx);
     if (!crt) { snprintf(buf, len, "(no peer certificate received)"); return; }
     size_t off = 0;
     int n = mbedtls_x509_dn_gets(buf, len, &crt->subject);
@@ -75,6 +81,12 @@ void jts_tls_dump_peer_cert(esp_transport_handle_t t, char *buf, size_t len)
         any = true;
     }
     if (!any && off < len) snprintf(buf + off, len - off, "(none)");
+}
+
+void jts_tls_dump_peer_cert(esp_transport_handle_t t, char *buf, size_t len)
+{
+    (void)t;   // kept in the signature for call-site compatibility; the transport is long gone
+    snprintf(buf, len, "%s", s_lastPeerCertInfo);
 }
 // JTS-CLOUDLINK-TLS-DIAG-END
 
@@ -130,6 +142,7 @@ static int ssl_connect(esp_transport_handle_t t, const char *host, int port, int
     if (esp_tls_conn_new_sync(host, strlen(host), port, &ssl->cfg, ssl->tls) <= 0) {
         ESP_LOGE(TAG, "Failed to open a new connection");
         esp_transport_set_errors(t, ssl->tls->error_handle);
+        capture_peer_cert_info(&ssl->tls->ssl);   // JTS-CLOUDLINK-TLS-DIAG: before destroy frees it
         esp_tls_conn_destroy(ssl->tls);
         ssl->tls = NULL;
         ssl->sockfd = INVALID_SOCKET;
