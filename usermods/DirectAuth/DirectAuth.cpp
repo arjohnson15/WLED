@@ -602,6 +602,9 @@ class DirectAuthUsermod : public Usermod {
             // read-only status while on the setup AP, so a failed join can be diagnosed from the
             // board itself (uptime = is it resetting; nw.ins[0].ssid = did the save land; wifi
             // rssi/bssid). Stock WLED serves all of these on its open setup AP anyway.
+            // the debug ring buffer (WLED_NET_RINGLOG builds only): needs to be readable during
+            // setup itself, since that is exactly when a failed join needs diagnosing
+            || u == "/jts/log"
             || (request->method() == HTTP_GET && (u == "/json" || u == "/json/info" || u == "/json/si" || u == "/json/cfg"))) return false;
         // The settings pages pull common.js and style.css at runtime with relative URLs
         // (so they arrive as /settings/common.js etc. and WLED serves them by suffix);

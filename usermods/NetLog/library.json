@@ -1,0 +1,5 @@
+{
+  "name": "NetLog",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}

@@ -986,6 +986,12 @@ WLED_GLOBAL volatile uint8_t jsonBufferLock _INIT(0);
     #define WLED_DEBUG_PORT 7868
   #endif
   WLED_GLOBAL int netDebugPrintPort _INIT(WLED_DEBUG_PORT);
+// JTS-NET-RINGLOG-START: buffer WLED_DEBUG output in RAM, served over HTTP by usermods/NetLog
+// at GET /jts/log -- for a diagnostic host with no route to the device's LAN, or no serial cable.
+#elif defined(WLED_NET_RINGLOG)
+  #include "net_ringlog.h"
+  #define DEBUGOUT RingLog
+// JTS-NET-RINGLOG-END
 #else
   #define DEBUGOUT Serial
 #endif
