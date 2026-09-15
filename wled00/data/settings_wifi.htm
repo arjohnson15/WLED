@@ -48,11 +48,17 @@
 			}).then((networks) => {
 				// If there are no networks, fetch it again in a second.
 				// but only do this a few times.
-				if (networks.length === 0 && scanLoops < 10) {
+				// JTS-WIFI-SCAN-RETRY-START: 10s was not enough. On real hardware, a fresh setup AP's
+				// first scan can return empty for 60-90s (ESP32 AP+STA concurrent-mode settling, not a
+				// bug in this fork -- QuinLED's own stock firmware runs the same driver and would see
+				// the same delay). Retrying for 2 minutes means it just works instead of leaving the
+				// button disabled after 10s and forcing a manual re-click/reload to try again.
+				if (networks.length === 0 && scanLoops < 120) {
 					scanLoops++;
 					setTimeout(N, 1000);
 					return;
 				}
+				// JTS-WIFI-SCAN-RETRY-END
 				scanLoops = 0;
 
 				if (networks.length > 0) {
