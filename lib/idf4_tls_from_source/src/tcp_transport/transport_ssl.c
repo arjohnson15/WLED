@@ -53,6 +53,31 @@ static inline transport_esp_tls_t *ssl_get_context_data(esp_transport_handle_t t
     return (transport_esp_tls_t *)t->data;
 }
 
+// JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
+// Declared (extern "C") directly in usermods/CloudLink/CloudLink.cpp, the only caller -- no
+// shared header, since cross-library include paths are not reliable in PlatformIO's LDF.
+void jts_tls_dump_peer_cert(esp_transport_handle_t t, char *buf, size_t len)
+{
+    buf[0] = '\0';
+    transport_esp_tls_t *ssl = ssl_get_context_data(t);
+    if (!ssl || !ssl->tls) { snprintf(buf, len, "(no tls context)"); return; }
+    const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&ssl->tls->ssl);
+    if (!crt) { snprintf(buf, len, "(no peer certificate received)"); return; }
+    size_t off = 0;
+    int n = mbedtls_x509_dn_gets(buf, len, &crt->subject);
+    if (n > 0) off = (size_t)n;
+    if (off < len) off += snprintf(buf + off, len - off, " | SAN: ");
+    const mbedtls_x509_sequence *san = &crt->subject_alt_names;
+    bool any = false;
+    for (; san != NULL && off < len; san = san->next) {
+        if (any && off < len) off += snprintf(buf + off, len - off, ", ");
+        off += snprintf(buf + off, len - off, "%.*s", (int)san->buf.len, (const char *)san->buf.p);
+        any = true;
+    }
+    if (!any && off < len) snprintf(buf + off, len - off, "(none)");
+}
+// JTS-CLOUDLINK-TLS-DIAG-END
+
 static int esp_tls_connect_async(esp_transport_handle_t t, const char *host, int port, int timeout_ms, bool is_plain_tcp)
 {
     transport_esp_tls_t *ssl = ssl_get_context_data(t);

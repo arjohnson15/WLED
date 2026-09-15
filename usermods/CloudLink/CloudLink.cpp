@@ -45,6 +45,13 @@
 #include <Update.h>
 #include <mbedtls/base64.h>
 #include "isrg_root_x1.h"
+// JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
+// Defined in lib/idf4_tls_from_source/src/tcp_transport/transport_ssl.c, which has access to the
+// private transport context this file does not. No shared header: cross-library include paths
+// are not reliable in PlatformIO's LDF, and this is an extern "C" function, so a forward
+// declaration is all either side needs.
+extern "C" void jts_tls_dump_peer_cert(esp_transport_handle_t ssl_transport, char *buf, size_t len);
+// JTS-CLOUDLINK-TLS-DIAG-END
 
 // json.cpp helpers that are not exported through fcn_declare.h
 void serializePalettes(JsonObject root, int page);
@@ -143,6 +150,7 @@ class CloudLinkUsermod : public Usermod {
     // JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
     volatile int     lastTlsCode   = 0;         // mbedtls error code from the last TLS connect attempt, if any
     volatile int     lastTlsFlags  = 0;         // mbedtls X.509 verify flags from the same attempt
+    char             lastPeerCert[160] = {0};   // subject + SAN of whatever certificate was actually received
     // JTS-CLOUDLINK-TLS-DIAG-END
     static const char* const serverErrors[];    // server error codes we know, indexed for lastErrDetail
     unsigned long lastConnectMs      = 0;
@@ -176,8 +184,11 @@ class CloudLinkUsermod : public Usermod {
       else if (d) { t += F(" (errno "); t += d; t += ')'; }
       // JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
       if (c == CLE_CONNECT && (lastTlsCode || lastTlsFlags)) {
-        t += F(" [tls -0x"); t += String(-lastTlsCode, 16);
-        t += F(" flags 0x"); t += String(lastTlsFlags, 16); t += ']';
+        long mag = lastTlsCode < 0 ? -(long)lastTlsCode : (long)lastTlsCode;   // String(x,16) mangles negative x
+        t += F(" [tls -0x"); t += String(mag, 16);
+        t += F(" flags 0x"); t += String((unsigned)lastTlsFlags, 16);
+        if (lastPeerCert[0]) { t += F(" peer cert: "); t += lastPeerCert; }
+        t += ']';
       }
       // JTS-CLOUDLINK-TLS-DIAG-END
       return t;
@@ -1031,6 +1042,7 @@ class CloudLinkUsermod : public Usermod {
           int tlsCode = 0, tlsFlags = 0;
           if (eh) esp_tls_get_and_clear_last_error(eh, &tlsCode, &tlsFlags);
           lastTlsCode = tlsCode; lastTlsFlags = tlsFlags;
+          jts_tls_dump_peer_cert(base, lastPeerCert, sizeof(lastPeerCert));
         }
         // JTS-CLOUDLINK-TLS-DIAG-END
         esp_transport_close(ws);
