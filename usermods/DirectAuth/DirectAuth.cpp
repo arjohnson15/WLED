@@ -211,8 +211,12 @@ class DirectAuthUsermod : public Usermod {
 
     DirectAuthGate* gate = nullptr;
 
-    // One-time loopback self-test: an anonymous GET /json/state must be refused. Guards the
-    // assumption that this handler was registered before WLED's own routes (see setup()).
+    // One-time self-test: an anonymous GET /json/state to the device's own STA IP must be
+    // refused. Guards the assumption that this handler was registered before WLED's own routes
+    // (see setup()). Deliberately NOT loopback: shouldBlock() exempts 127.0.0.1 on purpose (it's
+    // what lets CloudLink's HTTP passthrough work), so a loopback self-test always sees 200 OK
+    // and reports GATE INACTIVE even when the gate is protecting real clients correctly -- this
+    // was the "still unexplained" GATE INACTIVE report from 2026-09-08 on real hardware.
     int8_t        gateSelfTest   = -1;    // -1 not run, 0 failed, 1 passed, 2 could not run
     unsigned long selfTestDueAt  = 0;
 
@@ -657,7 +661,8 @@ class DirectAuthUsermod : public Usermod {
     void runGateSelfTest() {
       WiFiClient c;
       c.setTimeout(1500);
-      if (!c.connect(IPAddress(127, 0, 0, 1), 80)) { gateSelfTest = 2; DEBUG_PRINTLN(F("DirectAuth: self-test skipped (no loopback)")); return; }
+      IPAddress self = WiFi.localIP();  // NOT loopback -- see comment on gateSelfTest above
+      if (!c.connect(self, 80)) { gateSelfTest = 2; DEBUG_PRINTLN(F("DirectAuth: self-test skipped (could not reach own IP)")); return; }
       c.print(F("GET /json/state HTTP/1.0\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"));
       unsigned long t0 = millis();
       while (!c.available() && millis() - t0 < 1500) delay(1);
