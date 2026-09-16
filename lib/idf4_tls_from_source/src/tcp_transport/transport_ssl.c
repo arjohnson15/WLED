@@ -53,22 +53,43 @@ static inline transport_esp_tls_t *ssl_get_context_data(esp_transport_handle_t t
     return (transport_esp_tls_t *)t->data;
 }
 
-// JTS-CLOUDLINK-TLS-DIAG-START: temporary, remove once the connect-failure cause is confirmed
-// Public getter declared (extern "C") directly in usermods/CloudLink/CloudLink.cpp, the only
-// caller -- no shared header, since cross-library include paths are not reliable in PlatformIO's
-// LDF. Captured into this static buffer by capture_peer_cert_info() below, called from
-// ssl_connect()'s failure path BEFORE esp_tls_conn_destroy() frees the ssl context -- a caller
-// reading the transport handle afterward (as an earlier version of this diagnostic did) always
-// saw "(no tls context)" because destroy already ran by the time CloudLink.cpp got control back.
+// JTS-CLOUDLINK-TLS-FIX: releases 64/65 tried to read the peer certificate back out of the
+// mbedtls_ssl_context AFTER esp_tls_conn_new_sync() had already failed (release 64 read it too
+// late, after esp_tls_conn_destroy(); release 65 moved the read earlier, right before destroy).
+// Neither could ever have worked: mbedtls_ssl_get_peer_cert() (ssl_tls.c) unconditionally
+// returns NULL whenever ssl->session == NULL, and ssl->session is only populated by copying
+// ssl->session_negotiate into it once a handshake completes SUCCESSFULLY. On exactly the
+// failure this is meant to diagnose -- mbedtls_ssl_parse_certificate() calling
+// ssl_parse_certificate_verify() and getting a non-zero result back (which is what
+// MBEDTLS_ERR_X509_CERT_VERIFY_FAILED / flag 0x4 CN_MISMATCH is) -- the function takes the
+// `goto exit;` branch, which frees the just-parsed chain and returns without ever assigning it
+// to ssl->session_negotiate->peer_cert (that assignment only happens on the success path).
+// So there was never a certificate available to read back this way, at any point, on this
+// failure path, independent of the release 65 ordering fix or of MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
+// -- it will always have printed "(no peer certificate received)".
+// (Compare mbedtls_ssl_get_verify_result(), which explicitly falls back to
+// ssl->session_negotiate->verify_result when ssl->session is NULL -- ssl_tls.c ~4957 -- which is
+// why the verify-flags diagnostic from release 60/62, the -0x2700 / flag 0x4 this investigation
+// started from, has been reporting real data all along even though the cert dump could not.)
+//
+// Fix: capture the certificate from INSIDE verification instead of after it. mbedtls calls the
+// verify callback registered with mbedtls_ssl_conf_verify() once per certificate in the chain,
+// with a live, not-yet-freed mbedtls_x509_crt* and that certificate's own flags, regardless of
+// whether the overall chain ends up trusted (x509_crt.c's x509_crt_merge_flags_with_cb() calls it
+// unconditionally while walking the chain). That is the one place this data is guaranteed to
+// still exist. jts_tls_capture_verify_cb() below is registered from esp_create_mbedtls_handle()
+// in esp_tls_mbedtls.c and always returns 0 -- it only observes, it must never change what flags
+// mbedtls decides on, or this "diagnostic" would itself become a verification bypass.
+//
+// Declared extern "C" and forward-declared directly in usermods/CloudLink/CloudLink.cpp (the
+// jts_tls_dump_peer_cert() reader), not a shared header -- cross-library include paths are not
+// reliable in PlatformIO's LDF.
 static char s_lastPeerCertInfo[160] = {0};
 
-static void capture_peer_cert_info(mbedtls_ssl_context *ssl_ctx)
+static void format_peer_cert_info(const mbedtls_x509_crt *crt)
 {
     char *buf = s_lastPeerCertInfo;
     size_t len = sizeof(s_lastPeerCertInfo);
-    buf[0] = '\0';
-    const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(ssl_ctx);
-    if (!crt) { snprintf(buf, len, "(no peer certificate received)"); return; }
     size_t off = 0;
     int n = mbedtls_x509_dn_gets(buf, len, &crt->subject);
     if (n > 0) off = (size_t)n;
@@ -83,12 +104,23 @@ static void capture_peer_cert_info(mbedtls_ssl_context *ssl_ctx)
     if (!any && off < len) snprintf(buf + off, len - off, "(none)");
 }
 
+// Registered via mbedtls_ssl_conf_verify() (esp_tls_mbedtls.c). Not static: that TU declares it
+// extern and passes it as a function pointer, so it needs external linkage.
+int jts_tls_capture_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
+{
+    (void)ctx; (void)flags;
+    if (depth == 0 && crt) {   // depth 0 = the leaf/server certificate, the one with our SAN
+        format_peer_cert_info(crt);
+    }
+    return 0;   // observe only -- never override mbedtls's own verification result
+}
+
 void jts_tls_dump_peer_cert(esp_transport_handle_t t, char *buf, size_t len)
 {
-    (void)t;   // kept in the signature for call-site compatibility; the transport is long gone
-    snprintf(buf, len, "%s", s_lastPeerCertInfo);
+    (void)t;   // kept in the signature for call-site compatibility
+    snprintf(buf, len, "%s", s_lastPeerCertInfo[0] ? s_lastPeerCertInfo : "(no certificate seen this attempt)");
 }
-// JTS-CLOUDLINK-TLS-DIAG-END
+// JTS-CLOUDLINK-TLS-FIX-END
 
 static int esp_tls_connect_async(esp_transport_handle_t t, const char *host, int port, int timeout_ms, bool is_plain_tcp)
 {
@@ -132,6 +164,12 @@ static int ssl_connect(esp_transport_handle_t t, const char *host, int port, int
 
     ssl->cfg.timeout_ms = timeout_ms;
 
+    // JTS-CLOUDLINK-TLS-FIX: clear any capture left over from a previous attempt so a failure
+    // that never reaches certificate verification (e.g. a bare TCP/DNS failure) can't be
+    // misread as "the same certificate as last time" -- jts_tls_capture_verify_cb() below is
+    // the only thing that fills this in, and only once verification actually runs.
+    s_lastPeerCertInfo[0] = '\0';
+
     ssl->ssl_initialized = true;
     ssl->tls = esp_tls_init();
     if (ssl->tls == NULL) {
@@ -142,7 +180,10 @@ static int ssl_connect(esp_transport_handle_t t, const char *host, int port, int
     if (esp_tls_conn_new_sync(host, strlen(host), port, &ssl->cfg, ssl->tls) <= 0) {
         ESP_LOGE(TAG, "Failed to open a new connection");
         esp_transport_set_errors(t, ssl->tls->error_handle);
-        capture_peer_cert_info(&ssl->tls->ssl);   // JTS-CLOUDLINK-TLS-DIAG: before destroy frees it
+        // No cert capture here: by now, on a verify failure, mbedtls has already freed the
+        // parsed chain (see the JTS-CLOUDLINK-TLS-FIX comment above) -- s_lastPeerCertInfo was
+        // already filled during the handshake itself, via jts_tls_capture_verify_cb(), if
+        // verification ran at all.
         esp_tls_conn_destroy(ssl->tls);
         ssl->tls = NULL;
         ssl->sockfd = INVALID_SOCKET;

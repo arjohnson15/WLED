@@ -40,6 +40,14 @@ static esp_err_t esp_mbedtls_init_pk_ctx_for_ds(const void *pki);
 static const char *TAG = "esp-tls-mbedtls";
 static mbedtls_x509_crt *global_cacert = NULL;
 
+// JTS-CLOUDLINK-TLS-FIX: implemented in tcp_transport/transport_ssl.c, the only place that also
+// owns the diagnostic buffer it fills. Registered below via mbedtls_ssl_conf_verify() so it runs
+// once per certificate in the chain, from inside verification, while the parsed certificate is
+// still guaranteed to exist -- see the comment on jts_tls_capture_verify_cb() itself for why that
+// is not true of mbedtls_ssl_get_peer_cert() on a verification failure. It always returns 0 and
+// never touches *flags, so it cannot change what mbedtls decides to trust.
+extern int jts_tls_capture_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags);
+
 /* This function shall return the error message when appropriate log level has been set, otherwise this function shall do nothing */
 static void mbedtls_print_error_msg(int error)
 {
@@ -82,6 +90,11 @@ esp_err_t esp_create_mbedtls_handle(const char *hostname, size_t hostlen, const 
             ESP_LOGE(TAG, "Failed to set client configurations, returned [0x%04X] (%s)", esp_ret, esp_err_to_name(esp_ret));
             goto exit;
         }
+        // JTS-CLOUDLINK-TLS-FIX: harmless when authmode is VERIFY_NONE (mbedtls simply never
+        // calls it -- ssl_tls.c's ssl_parse_certificate_verify() returns before touching f_vrfy
+        // in that mode), so this can be set unconditionally rather than threading a flag through
+        // set_client_config() for the one caller (CloudLink) that actually verifies.
+        mbedtls_ssl_conf_verify(&tls->conf, jts_tls_capture_verify_cb, NULL);
     } else if (tls->role == ESP_TLS_SERVER) {
 #ifdef CONFIG_ESP_TLS_SERVER
         esp_ret = set_server_config((esp_tls_cfg_server_t *) cfg, tls);
