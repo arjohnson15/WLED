@@ -84,34 +84,42 @@ static inline transport_esp_tls_t *ssl_get_context_data(esp_transport_handle_t t
 // Declared extern "C" and forward-declared directly in usermods/CloudLink/CloudLink.cpp (the
 // jts_tls_dump_peer_cert() reader), not a shared header -- cross-library include paths are not
 // reliable in PlatformIO's LDF.
-static char s_lastPeerCertInfo[160] = {0};
+// JTS-CLOUDLINK-TLS-FIX2: the depth==0-means-leaf assumption above was wrong for this mbedtls
+// build's chain-walk order -- on real hardware it captured "CN=ISRG Root X2" (a root CA), not
+// the leaf. Rather than guess again at which depth means what, log every certificate the callback
+// visits, with its own depth and per-cert verify flags, so the whole chain is visible at once.
+static char s_lastPeerCertInfo[480] = {0};
+static size_t s_lastPeerCertOff = 0;
 
-static void format_peer_cert_info(const mbedtls_x509_crt *crt)
+static void append_cert_info(int depth, uint32_t flags, const mbedtls_x509_crt *crt)
 {
     char *buf = s_lastPeerCertInfo;
     size_t len = sizeof(s_lastPeerCertInfo);
-    size_t off = 0;
-    int n = mbedtls_x509_dn_gets(buf, len, &crt->subject);
-    if (n > 0) off = (size_t)n;
-    if (off < len) off += snprintf(buf + off, len - off, " | SAN: ");
+    size_t off = s_lastPeerCertOff;
+    if (off >= len) return;
+    off += snprintf(buf + off, len - off, "[depth=%d flags=0x%x ca=%d] ", depth, (unsigned)flags, (int)crt->ca_istrue);
+    if (off >= len) { s_lastPeerCertOff = off; return; }
+    int n = mbedtls_x509_dn_gets(buf + off, len - off, &crt->subject);
+    if (n > 0) off += (size_t)n;
+    if (off < len) off += snprintf(buf + off, len - off, " SAN:");
     const mbedtls_x509_sequence *san = &crt->subject_alt_names;
     bool any = false;
     for (; san != NULL && off < len; san = san->next) {
-        if (any && off < len) off += snprintf(buf + off, len - off, ", ");
+        if (any && off < len) off += snprintf(buf + off, len - off, ",");
         off += snprintf(buf + off, len - off, "%.*s", (int)san->buf.len, (const char *)san->buf.p);
         any = true;
     }
-    if (!any && off < len) snprintf(buf + off, len - off, "(none)");
+    if (!any && off < len) off += snprintf(buf + off, len - off, "(none)");
+    if (off < len) off += snprintf(buf + off, len - off, "; ");
+    s_lastPeerCertOff = off < len ? off : len;
 }
 
 // Registered via mbedtls_ssl_conf_verify() (esp_tls_mbedtls.c). Not static: that TU declares it
 // extern and passes it as a function pointer, so it needs external linkage.
 int jts_tls_capture_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
 {
-    (void)ctx; (void)flags;
-    if (depth == 0 && crt) {   // depth 0 = the leaf/server certificate, the one with our SAN
-        format_peer_cert_info(crt);
-    }
+    (void)ctx;
+    if (crt) append_cert_info(depth, flags ? *flags : 0, crt);
     return 0;   // observe only -- never override mbedtls's own verification result
 }
 
@@ -120,7 +128,7 @@ void jts_tls_dump_peer_cert(esp_transport_handle_t t, char *buf, size_t len)
     (void)t;   // kept in the signature for call-site compatibility
     snprintf(buf, len, "%s", s_lastPeerCertInfo[0] ? s_lastPeerCertInfo : "(no certificate seen this attempt)");
 }
-// JTS-CLOUDLINK-TLS-FIX-END
+// JTS-CLOUDLINK-TLS-FIX2-END
 
 static int esp_tls_connect_async(esp_transport_handle_t t, const char *host, int port, int timeout_ms, bool is_plain_tcp)
 {
@@ -169,6 +177,7 @@ static int ssl_connect(esp_transport_handle_t t, const char *host, int port, int
     // misread as "the same certificate as last time" -- jts_tls_capture_verify_cb() below is
     // the only thing that fills this in, and only once verification actually runs.
     s_lastPeerCertInfo[0] = '\0';
+    s_lastPeerCertOff = 0;
 
     ssl->ssl_initialized = true;
     ssl->tls = esp_tls_init();
