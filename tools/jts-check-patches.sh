@@ -41,7 +41,7 @@ check "board picker script"       wled00/data/settings_leds.htm        "JTS-BOAR
 check "board picker is called"    wled00/data/settings_leds.htm        "jtsFillBoards()"
 check "AP client count fix (start)" wled00/network.cpp                 "JTS-APCLIENTS-FIX-START"
 check "AP client count fix (end)"   wled00/network.cpp                 "JTS-APCLIENTS-FIX-END"
-check "first-time setup through the gate" usermods/DirectAuth/DirectAuth.cpp "!hasCreds && apActive"
+check "login-first setup gate"         usermods/DirectAuth/DirectAuth.cpp "JTS-LOGIN-FIRST"
 
 if [ $fail -ne 0 ]; then
   echo

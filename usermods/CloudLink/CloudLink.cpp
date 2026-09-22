@@ -1264,6 +1264,8 @@ class CloudLinkUsermod : public Usermod {
       doc["authed"]    = (bool)authenticated;
       doc["error"]     = errorText();
       doc["reconnects"]= reconnects;
+      if (task) doc["stackMin"] = (uint32_t)uxTaskGetStackHighWaterMark(task);   // bytes never used, of CL_TASK_STACK
+      doc["heap"]      = ESP.getFreeHeap();
       #ifdef JTS_BUILD
       doc["build"]     = JTS_BUILD;
       #endif

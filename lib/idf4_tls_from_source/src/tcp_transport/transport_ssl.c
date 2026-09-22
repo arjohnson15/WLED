@@ -105,7 +105,8 @@ static void append_cert_info(int depth, uint32_t flags, const mbedtls_x509_crt *
     const mbedtls_x509_sequence *san = &crt->subject_alt_names;
     bool any = false;
     for (; san != NULL && off < len; san = san->next) {
-        if (any && off < len) off += snprintf(buf + off, len - off, ",");
+        if (any) off += snprintf(buf + off, len - off, ",");
+        if (off >= len) break;   // snprintf returns the would-be length: never let len - off wrap
         off += snprintf(buf + off, len - off, "%.*s", (int)san->buf.len, (const char *)san->buf.p);
         any = true;
     }

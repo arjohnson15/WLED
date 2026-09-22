@@ -585,33 +585,16 @@ class DirectAuthUsermod : public Usermod {
       }
       if (isPublicPath(request->url())) return false;
       loadCredentials();
-      // First-time setup: the board is on its setup AP and nobody has created a login yet.
-      // WLED's own WiFi setup lives at http://4.3.2.1/settings/wifi -- an IP host, so the
-      // name-based carve-out above does not apply -- and its Save is a POST that the rule
-      // below would answer with a 401, so the credentials were never written, the board
-      // rebooted with nothing and came straight back as WLED-AP. Every build with this
-      // usermod failed first-time WiFi setup that way; QuinLED's stock firmware, without it,
-      // never did (2026-09-14). Only while the setup AP is up, only the WiFi setup surface.
-      if (!hasCreds && apActive) {
-        const String& u = request->url();
-        if (u == "/" || u == "/welcome" || u == "/settings" || u == "/settings/wifi"
-            || u == "/settings/s.js" || u == "/json/net"
-            // the WiFi page's cloud section: the pairing code is entered here, before the
-            // WiFi save, and must be storable before any login exists
-            || u == "/cloud/status" || u == "/cloud/pair"
-            // read-only status while on the setup AP, so a failed join can be diagnosed from the
-            // board itself (uptime = is it resetting; nw.ins[0].ssid = did the save land; wifi
-            // rssi/bssid). Stock WLED serves all of these on its open setup AP anyway.
-            // the debug ring buffer (WLED_NET_RINGLOG builds only): needs to be readable during
-            // setup itself, since that is exactly when a failed join needs diagnosing
-            || u == "/jts/log"
-            || (request->method() == HTTP_GET && (u == "/json" || u == "/json/info" || u == "/json/si" || u == "/json/cfg"))) return false;
-        // The settings pages pull common.js and style.css at runtime with relative URLs
-        // (so they arrive as /settings/common.js etc. and WLED serves them by suffix);
-        // without them the WiFi page renders as a blank white screen -- verified in a
-        // real browser, 2026-09-14. skin.css is optional but requested the same way.
-        if (u.endsWith(F("/common.js")) || u.endsWith(F("/style.css")) || u.endsWith(F("/skin.css"))) return false;
-      }
+      // JTS-LOGIN-FIRST (2026-09-22): on the setup AP with no login yet, EVERY page goes to
+      // /login first -- the "create admin login" form -- and /auth/setup logs the browser in
+      // (finishLogin issues the cookie), so the welcome page, WiFi settings, the scan, the cloud
+      // pairing code and the Save that follow are all ordinary authenticated requests. Between
+      // 2026-09-14 and 2026-09-22 this block instead allow-listed the WiFi-setup surface so the
+      // board could join WiFi before any login existed; that put the login step after the join,
+      // which Andrew did not want, and it left a dead end: a board back on WLED-AP with WiFi
+      // configured but no login served the main UI at "/" with half its requests refused
+      // ("Loading WLED UI" forever). Login first removes both. Captive-portal probes still pass
+      // via the name-based carve-out above and land on /login through WLED's own 302.
       if (!hasCreds) return true;
       return !isAuthenticated(request);
     }
