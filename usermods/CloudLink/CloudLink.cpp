@@ -62,7 +62,7 @@ void serializeNodes(JsonObject root);
 #define CL_CA_FILE             "/cloud_ca.pem"
 #define CL_DEFAULT_PORT        443
 #define CL_DEFAULT_PATH        "/device/ws"
-#define CL_TASK_STACK          12288
+#define CL_TASK_STACK          16384   // 12288 until 2026-09-22: a full ECDSA-P384 chain verify is deeper than the old RSA-only path
 #define CL_TASK_PRIO           1
 #define CL_RX_QUEUE_LEN        8
 #define CL_TX_QUEUE_LEN        12

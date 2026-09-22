@@ -29,7 +29,9 @@
       "-DCONFIG_MBEDTLS_ECP_NIST_OPTIM=1",
       "-DCONFIG_MBEDTLS_GCM_C=1",
       "-DCONFIG_MBEDTLS_PEM_PARSE_C=1",
-      "-DCONFIG_MBEDTLS_SHA512_C=1"
+      "-DCONFIG_MBEDTLS_SHA512_C=1",
+      "-Ilib/idf4_tls_from_source/src",
+      "-DMBEDTLS_CONFIG_FILE=\\\"jts_mbedtls_config.h\\\""
     ]
   }
 }

@@ -58,16 +58,13 @@
 /* 7. SHA-512/384 is REQUIRED (2026-09-22): Let's Encrypt's ECDSA hierarchy (leaf, the Ex/YEx
  *    intermediates and the ISRG Root X2 chain) is signed ecdsa-with-SHA384. Without
  *    MBEDTLS_SHA512_C, mbedtls_oid_get_sig_alg() fails on every one of those certificates and
- *    ssl_parse_certificate_chain() silently drops them (MBEDTLS_ERR_X509_UNKNOWN_SIG_ALG +
- *    MBEDTLS_ERR_OID_NOT_FOUND is the one parse error it deliberately ignores), so the only
- *    certificate left to verify is the cross-signed root and the connection fails with
- *    MBEDTLS_X509_BADCERT_CN_MISMATCH -- reproduced on real hardware and on the host. The
- *    package's libmbedcrypto.a has md.c compiled without the SHA-384/512 md_info entries and an
- *    empty esp_sha512.c, so md.c, sha512.c (wrappers only) and the port's esp_sha512.c are
- *    vendored. esp_sha512.c is the parallel-engine (classic ESP32) hardware port and needs the
- *    ALT context from sha512_alt.h; a DMA-engine chip (S2/S3/C3) would need port/sha/dma/. */
-#if !defined(MBEDTLS_SHA512_ALT) || !SOC_SHA_SUPPORT_PARALLEL_ENG
-#error "idf4_tls_from_source: SHA-512 must use the port's parallel-engine hardware ALT (esp_sha512.c vendored for classic ESP32 only)"
+ *    ssl_parse_certificate_chain() silently drops them, leaving only the cross-signed root and a
+ *    CN_MISMATCH -- reproduced on real hardware and on the host. And it must be the SOFTWARE
+ *    implementation (jts_mbedtls_config.h undefines MBEDTLS_SHA512_ALT): the package's hardware
+ *    port object is empty, and the software code is what the host reproduction verified. If this
+ *    fires, the -DMBEDTLS_CONFIG_FILE override in library.json did not take effect. */
+#if defined(MBEDTLS_SHA512_ALT)
+#error "idf4_tls_from_source: SHA-512 must be the software implementation (MBEDTLS_SHA512_ALT is set; is jts_mbedtls_config.h in use?)"
 #endif
 
 /* Give the object a symbol so the linker has nothing to complain about. */
