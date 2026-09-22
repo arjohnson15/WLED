@@ -19,6 +19,8 @@
 
 #include "net_ringlog.h"
 #include <esp_system.h>
+#include <soc/rtc_cntl_reg.h>
+#include <soc/soc.h>
 
 class NetLogUsermod : public Usermod {
   public:
@@ -42,6 +44,11 @@ class NetLogUsermod : public Usermod {
         default:               r = "UNKNOWN";                   break;
       }
       DEBUG_PRINTF_P(PSTR("\n=== JTS BOOT === reset_reason: %s ===\n"), r);
+      // JTS-BROWNOUT-OFF (2026-09-22): see the commit for why. Standard ESP32 mitigation for a
+      // supply that sags under WiFi TX + crypto; the handshake is the one moment this board
+      // draws its peak current, and the reset lands exactly there.
+      WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+      DEBUG_PRINTLN(F("=== brownout detector disabled ==="));
 
       server.on("/jts/log", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, F("text/plain"), RingLog.dump());

@@ -25,7 +25,7 @@ size_t RingLogClass::write(uint8_t c) {
   s_buf[s_head] = (char)c;
   s_head = (s_head + 1) % JTS_RTCLOG_SIZE;
   if (s_count < JTS_RTCLOG_SIZE) s_count++;
-  return Serial.write(c);
+  return 1;   // no Serial echo: UART0 TX is GPIO1 = LED3 data on the Dig-Quad
 }
 
 size_t RingLogClass::write(const uint8_t *b, size_t len) {

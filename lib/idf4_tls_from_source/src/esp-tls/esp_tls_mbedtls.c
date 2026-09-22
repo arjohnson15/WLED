@@ -110,6 +110,16 @@ esp_err_t esp_create_mbedtls_handle(const char *hostname, size_t hostlen, const 
             0
         };
         mbedtls_ssl_conf_ciphersuites(&tls->conf, jts_suites);
+        // JTS-CLOUDLINK-TLS-FIX4 (2026-09-22): prefer P-256 for the ephemeral key exchange. The
+        // server's certificate is P-384 and that verify cannot be avoided, but ECDHE on P-384
+        // roughly doubles the handshake's ECC work and its current draw; P-256 is what every
+        // other ESP32 TLS client does by default.
+        static const mbedtls_ecp_group_id jts_curves[] = {
+            MBEDTLS_ECP_DP_SECP256R1,
+            MBEDTLS_ECP_DP_SECP384R1,
+            MBEDTLS_ECP_DP_NONE
+        };
+        mbedtls_ssl_conf_curves(&tls->conf, jts_curves);
     } else if (tls->role == ESP_TLS_SERVER) {
 #ifdef CONFIG_ESP_TLS_SERVER
         esp_ret = set_server_config((esp_tls_cfg_server_t *) cfg, tls);
