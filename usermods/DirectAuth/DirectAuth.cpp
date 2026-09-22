@@ -585,16 +585,28 @@ class DirectAuthUsermod : public Usermod {
       }
       if (isPublicPath(request->url())) return false;
       loadCredentials();
-      // JTS-LOGIN-FIRST (2026-09-22): on the setup AP with no login yet, EVERY page goes to
-      // /login first -- the "create admin login" form -- and /auth/setup logs the browser in
-      // (finishLogin issues the cookie), so the welcome page, WiFi settings, the scan, the cloud
-      // pairing code and the Save that follow are all ordinary authenticated requests. Between
-      // 2026-09-14 and 2026-09-22 this block instead allow-listed the WiFi-setup surface so the
-      // board could join WiFi before any login existed; that put the login step after the join,
-      // which Andrew did not want, and it left a dead end: a board back on WLED-AP with WiFi
-      // configured but no login served the main UI at "/" with half its requests refused
-      // ("Loading WLED UI" forever). Login first removes both. Captive-portal probes still pass
-      // via the name-based carve-out above and land on /login through WLED's own 302.
+      // JTS-LOGIN-FIRST (2026-09-22): on the setup AP the pages a person lands on ("/",
+      // welcome, the WiFi settings page) go to /login until a login exists, so the admin login is
+      // created BEFORE the board is ever put on a network. deny() sends them on to /settings/wifi.
+      //
+      // Everything the WiFi settings page then needs -- its script, the scan, the cloud pairing
+      // code and the Save itself -- is allowed on the setup AP WITHOUT the session cookie. The
+      // first version of login-first (release 71) gated those on the cookie too, and the phone's
+      // captive-portal browser attaches the cookie to page loads but not reliably to a page's
+      // own fetches/POSTs: the scan showed "nothing found" forever (a refused reply parses as an
+      // empty list) and the Save "did not hold". Release 69's cookie-free setup surface had been
+      // proven to land the save from that same browser, so this restores exactly that surface,
+      // only while apActive, which is also all stock WLED offers on its setup AP.
+      if (apActive) {
+        const String& u = request->url();
+        bool landing = request->method() == HTTP_GET
+                    && (u == "/" || u == "/welcome" || u == "/settings" || u == "/settings/wifi");
+        if (!hasCreds && landing) return true;   // login first
+        if (u == "/settings/wifi" || u == "/settings/s.js" || u == "/json/net"
+            || u == "/cloud/status" || u == "/cloud/pair" || u == "/jts/log"
+            || u.endsWith(F("/common.js")) || u.endsWith(F("/style.css")) || u.endsWith(F("/skin.css"))
+            || (request->method() == HTTP_GET && (u == "/json" || u == "/json/info" || u == "/json/si" || u == "/json/cfg"))) return false;
+      }
       if (!hasCreds) return true;
       return !isAuthenticated(request);
     }
@@ -604,7 +616,8 @@ class DirectAuthUsermod : public Usermod {
       if (browser) {
         String loc = F("/login");
         const String& url = request->url();
-        if (url.length() > 1 && url != "/" && daSafeRedirect(url) == url && url.indexOf('?') < 0) { loc += F("?to="); loc += url; }
+        if (apActive && (url == "/" || url == "/welcome" || url == "/settings")) loc += F("?to=/settings/wifi");   // JTS-LOGIN-FIRST: on the setup AP, land on WiFi setup
+        else if (url.length() > 1 && url != "/" && daSafeRedirect(url) == url && url.indexOf('?') < 0) { loc += F("?to="); loc += url; }
         sendRedirect(request, loc);
       } else {
         AsyncWebServerResponse* res = request->beginResponse(401, FPSTR(CONTENT_TYPE_JSON), F("{\"error\":\"unauthorized\"}"));
