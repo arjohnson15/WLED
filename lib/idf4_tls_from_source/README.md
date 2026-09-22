@@ -56,18 +56,21 @@ headers (checked with `diff -rq`); only `bignum.c` and `ecp.c` differ from stock
 | crypto switched off entirely | `ecp.c` `ecp_curves.c` `ecdh.c` `ecdsa.c` `pem.c` |
 | files whose content depends on the macros above (override) | `oid.c` `pk.c` `pk_wrap.c` `pkparse.c` `cipher.c` `cipher_wrap.c` `constant_time.c` `x509_crt.c` |
 | library-private headers those need (not shipped in the package) | `common.h` `constant_time_internal.h` `constant_time_invasive.h` `ecp_invasive.h` |
+| SHA-384/512 (added 2026-09-22 -- Let's Encrypt's ECDSA chains are signed `ecdsa-with-SHA384`) | `md.c` (the package's copy lacks the SHA-384/512 `md_info` entries) `sha512.c` (only the `mbedtls_sha512_ret` wrappers survive; the body is under the port's ALT) and `port/esp_sha512.c` (IDF v4.4.8 `components/mbedtls/port/sha/parallel_engine/`, the hardware SHA-512 port for classic ESP32; the package's `esp_sha512.c.obj` is empty) |
 
 Deliberately **not** vendored: `gcm.c` — `esp_config.h` sets `MBEDTLS_GCM_ALT` whenever hardware
 AES is on and the package exports `esp_aes_gcm_*`, which `gcm_alt.h` maps `mbedtls_gcm_*` onto;
 `ssl_srv.c`, `ssl_ticket.c`, `ssl_cache.c`, `ssl_cookie.c`, `debug.c`, `net_sockets.c` (server,
 tickets, debug are off; cache/cookie/net_sockets are still exported by the package); `x509.c`
-(only reacts to PEM through an `#include`); `md.c`/`sha512.c` (SHA-512 stays off, so SHA-384
-suites are simply filtered out of the list at runtime by `mbedtls_md_info_from_type` returning NULL).
+(only reacts to PEM through an `#include`); ~~`md.c`/`sha512.c`~~ -- **now vendored (2026-09-22)**: with SHA-512 off, `mbedtls_oid_get_sig_alg()` fails on
+every `ecdsa-with-SHA384` certificate and `ssl_parse_certificate_chain()` silently drops them, which is
+what `wled.cloudjohnson.com`'s whole Let's Encrypt ECDSA chain is; see "SHA-384" below.
 
 **esp-idf v4.4.8** — `components/esp-tls/{esp_tls.c, esp_tls_mbedtls.c, esp_tls_error_capture.c,
 esp-tls-crypto/esp_tls_crypto.c}` plus the two `private_include` headers, and
 `components/tcp_transport/{transport.c, transport_ssl.c, transport_internal.c, transport_ws.c}`
 plus `private_include/esp_transport_internal.h` (the package ships the public headers only).
+`components/mbedtls/port/sha/parallel_engine/esp_sha512.c` (added 2026-09-22, see SHA-384 below).
 `esp_tls.h` in the package is identical to v4.4.8's.
 
 ## How it is compiled
@@ -133,9 +136,20 @@ duplicate definitions.
 is a pairing/relay cycle against `wled.cloudjohnson.com`, then watch heap: TLS 1.2 with 16 KB I/O
 buffers costs the same as it did on the official package. Known behavioural differences from that
 package, inherited from Tasmota's crypto build and not fixable here without also overriding the
-package's `libmbedx509.a`: certificate validity dates are **not** checked (`MBEDTLS_HAVE_TIME` off),
-and there is no SHA-384/512, so `*_SHA384` suites are never offered (fine for Let's Encrypt chains;
-the server picks `ECDHE-*-AES128-GCM-SHA256`).
+package's `libmbedx509.a`: certificate validity dates are **not** checked (`MBEDTLS_HAVE_TIME` off).
+
+**SHA-384 (2026-09-22).** The sentence that used to be here -- "there is no SHA-384/512 ... fine for
+Let's Encrypt chains" -- was the bug behind six days of `connect failed`. Let's Encrypt's ECDSA
+hierarchy (leaf, the `YE2` intermediate, `Root YE`, chained to `ISRG Root X2`) is signed
+`ecdsa-with-SHA384`. Without `MBEDTLS_SHA512_C`, `mbedtls_oid_get_sig_alg()` returns
+`MBEDTLS_ERR_OID_NOT_FOUND` for each of them and `ssl_parse_certificate_chain()` (ssl_tls.c) drops the
+certificate on exactly that error (-0x262E) and carries on, so the only certificate left to verify
+was the cross-signed `ISRG Root X2`: it validates against the pinned X1 and then fails the hostname
+check -- `-0x2700`, flags `0x4` (`BADCERT_CN_MISMATCH`), `CN=ISRG Root X2` at depth 0. That exact
+output was reproduced on the build host with stock mbedtls 2.28.8 (`scripts/config.py unset
+MBEDTLS_SHA512_C`) and the server's real chain, and passes with SHA-512 on. `jts_tls_config_check.c`
+now requires `MBEDTLS_SHA512_C` and the parallel-engine ALT. A DMA-SHA chip (S2/S3/C3) would need
+`port/sha/dma/esp_sha512.c` instead of the parallel-engine file vendored here.
 
 ## Re-vendoring when the package moves
 

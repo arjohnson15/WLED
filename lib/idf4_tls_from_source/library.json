@@ -3,8 +3,12 @@
   "version": "4.4.8-2.28.8",
   "description": "TLS client layer for Tasmota's IDF 4.4.8 arduino-esp32 package, whose precompiled libs were built with CONFIG_MBEDTLS_TLS_DISABLED. Vendors mbedtls 2.28.8 (espressif fork, IDF 4.4.8 submodule 4cfd2256), esp-tls and tcp_transport sources and compiles them against the package's own esp_config.h with TLS switched on. See README.md.",
   "license": "Apache-2.0",
-  "platforms": ["espressif32"],
-  "frameworks": ["arduino"],
+  "platforms": [
+    "espressif32"
+  ],
+  "frameworks": [
+    "arduino"
+  ],
   "build": {
     "libArchive": false,
     "extraScript": "jts_guard.py",
@@ -24,7 +28,8 @@
       "-DCONFIG_MBEDTLS_ECP_DP_SECP384R1_ENABLED=1",
       "-DCONFIG_MBEDTLS_ECP_NIST_OPTIM=1",
       "-DCONFIG_MBEDTLS_GCM_C=1",
-      "-DCONFIG_MBEDTLS_PEM_PARSE_C=1"
+      "-DCONFIG_MBEDTLS_PEM_PARSE_C=1",
+      "-DCONFIG_MBEDTLS_SHA512_C=1"
     ]
   }
 }
