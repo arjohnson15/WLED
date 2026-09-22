@@ -48,15 +48,21 @@
 			}).then((networks) => {
 				// If there are no networks, fetch it again in a second.
 				// but only do this a few times.
-				// JTS-WIFI-SCAN-RETRY-START: 10s was not enough. On real hardware, a fresh setup AP's
-				// first scan can return empty for 60-90s (ESP32 AP+STA concurrent-mode settling, not a
-				// bug in this fork -- QuinLED's own stock firmware runs the same driver and would see
-				// the same delay). Retrying for 2 minutes means it just works instead of leaving the
-				// button disabled after 10s and forcing a manual re-click/reload to try again.
-				if (networks.length === 0 && scanLoops < 120) {
+				// JTS-WIFI-SCAN-RETRY-START (2026-09-22, replaces the 120 x 1 s loop from 2026-09-15):
+				// every poll that finds nothing makes the board start ANOTHER full all-channel scan, and
+				// a scan takes the setup AP's radio off its channel -- two minutes of that made the AP
+				// itself unreachable (POST timeouts, dropped saves). Stock does 10 x 1 s; this does a
+				// few polls spaced out, then hands back the button and says to type the name instead.
+				if (networks.length === 0 && scanLoops < 8) {
 					scanLoops++;
-					setTimeout(N, 1000);
+					setTimeout(N, 2000);
 					return;
+				}
+				if (networks.length === 0) {
+					button.disabled = false;
+					button.textContent = "Scan";
+					const hint = gId("scanhint");
+					if (hint) hint.textContent = "No networks found while a phone is on the setup network -- just type your network name and password below.";
 				}
 				// JTS-WIFI-SCAN-RETRY-END
 				scanLoops = 0;
@@ -259,7 +265,7 @@ Static subnet mask:<br>
 	<h2>WiFi & Network Settings</h2>
 	<div class="sec">
 		<h3>Wireless network</h3>
-		<button type="button" id="scan" onclick="N()">Scan</button><br>
+		<button type="button" id="scan" onclick="N()">Scan</button> <span id="scanhint" style="font-size:.9em;opacity:.8"></span><br>
 		<div id="wifi">
 			<div id="wifi_entries"></div>
 			<hr class="sml">

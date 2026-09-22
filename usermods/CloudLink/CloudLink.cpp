@@ -1231,15 +1231,17 @@ class CloudLinkUsermod : public Usermod {
 
     void startTask() {
       if (task) return;
-      rxq    = xQueueCreate(CL_RX_QUEUE_LEN, sizeof(char*));
-      txq    = xQueueCreate(CL_TX_QUEUE_LEN, sizeof(char*));
-      cfgMtx = xSemaphoreCreateMutex();
+      if (!rxq)    rxq    = xQueueCreate(CL_RX_QUEUE_LEN, sizeof(char*));   // create once; a failed task start must not leak these every loop pass
+      if (!txq)    txq    = xQueueCreate(CL_TX_QUEUE_LEN, sizeof(char*));
+      if (!cfgMtx) cfgMtx = xSemaphoreCreateMutex();
       if (!rxq || !txq || !cfgMtx) { DEBUG_PRINTLN(F("CloudLink: queue alloc failed")); return; }
       #if CONFIG_FREERTOS_UNICORE
-      xTaskCreate(taskEntry, "cloudlink", CL_TASK_STACK, this, CL_TASK_PRIO, &task);
+      BaseType_t ok = xTaskCreate(taskEntry, "cloudlink", CL_TASK_STACK, this, CL_TASK_PRIO, &task);
       #else
-      xTaskCreatePinnedToCore(taskEntry, "cloudlink", CL_TASK_STACK, this, CL_TASK_PRIO, &task, 0);   // keep off the LED core
+      BaseType_t ok = xTaskCreatePinnedToCore(taskEntry, "cloudlink", CL_TASK_STACK, this, CL_TASK_PRIO, &task, 0);   // keep off the LED core
       #endif
+      if (ok != pdPASS) { task = nullptr; DEBUG_PRINTF_P(PSTR("CloudLink: task create failed (heap %u)\n"), ESP.getFreeHeap()); }
+      else DEBUG_PRINTLN(F("CloudLink: task started"));
     }
 
     // ---------- HTTP helpers ----------

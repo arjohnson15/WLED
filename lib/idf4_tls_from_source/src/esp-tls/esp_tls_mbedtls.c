@@ -95,6 +95,21 @@ esp_err_t esp_create_mbedtls_handle(const char *hostname, size_t hostlen, const 
         // in that mode), so this can be set unconditionally rather than threading a flag through
         // set_client_config() for the one caller (CloudLink) that actually verifies.
         mbedtls_ssl_conf_verify(&tls->conf, jts_tls_capture_verify_cb, NULL);
+        // JTS-CLOUDLINK-TLS-FIX3 (2026-09-22): prefer the SHA-256 suite. With SHA-384 now compiled
+        // in, mbedtls' default order offers AES-256-GCM-SHA384 first and wled.cloudjohnson.com
+        // follows the client's preference (checked with openssl -cipher), which would route the
+        // handshake transcript hash and PRF through the hardware SHA-512 port on its very first
+        // run. SHA-256 is the path every other part of this firmware already exercises; SHA-384
+        // then only serves certificate signatures, which the host reproduction proved. The 384
+        // suites stay as fallbacks.
+        static const int jts_suites[] = {
+            MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            0
+        };
+        mbedtls_ssl_conf_ciphersuites(&tls->conf, jts_suites);
     } else if (tls->role == ESP_TLS_SERVER) {
 #ifdef CONFIG_ESP_TLS_SERVER
         esp_ret = set_server_config((esp_tls_cfg_server_t *) cfg, tls);
