@@ -18,10 +18,31 @@
 #endif
 
 #include "net_ringlog.h"
+#include <esp_system.h>
 
 class NetLogUsermod : public Usermod {
   public:
     void setup() override {
+      // Print WHY the last boot ended, into the RTC-persisted log. This is the datum that has
+      // been missing: after a crash takes the board to WLED-AP, GET /jts/log shows this line and
+      // the crash decides the whole direction -- PANIC = a code bug (TLS/CloudLink), TASK_WDT =
+      // something blocked too long, BROWNOUT = the USB supply sagged during the crypto (not code
+      // at all), SW = an intentional restart, POWERON = a clean cold boot.
+      const char* r;
+      switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:  r = "POWERON (clean cold boot)"; break;
+        case ESP_RST_SW:       r = "SW (esp_restart called)";   break;
+        case ESP_RST_PANIC:    r = "PANIC (crash/exception)";   break;
+        case ESP_RST_INT_WDT:  r = "INT_WDT (interrupt watchdog)"; break;
+        case ESP_RST_TASK_WDT: r = "TASK_WDT (task watchdog)";  break;
+        case ESP_RST_WDT:      r = "WDT (other watchdog)";      break;
+        case ESP_RST_BROWNOUT: r = "BROWNOUT (supply voltage sagged)"; break;
+        case ESP_RST_DEEPSLEEP:r = "DEEPSLEEP";                 break;
+        case ESP_RST_EXT:      r = "EXT (external reset pin)";  break;
+        default:               r = "UNKNOWN";                   break;
+      }
+      DEBUG_PRINTF_P(PSTR("\n=== JTS BOOT === reset_reason: %s ===\n"), r);
+
       server.on("/jts/log", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, F("text/plain"), RingLog.dump());
       });
