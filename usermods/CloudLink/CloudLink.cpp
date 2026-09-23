@@ -77,7 +77,7 @@ void serializeNodes(JsonObject root);
 #define CL_HTTP_IDLE_MS        600                // once it has, this much silence means the response ended
 #define CL_LIVE_HOLD_MS        2500               // how long a pushed frame stays before WLED resumes its own effects
 #define CL_READ_CHUNK          1024
-#define CL_CONNECT_TIMEOUT_MS  10000
+#define CL_CONNECT_TIMEOUT_MS  30000   // 10000 until 2026-09-23: covers TCP connect AND the whole TLS handshake, which on this core is seconds of ECC math
 #define CL_READ_TIMEOUT_MS     200
 #define CL_READ_EMPTY_MAX      50    // empty reads in a row before the link counts as lost (~10 s)
 #define CL_SEND_WAIT_MS        400   // how long a queued outbound frame waits for a free slot
@@ -1025,7 +1025,20 @@ class CloudLinkUsermod : public Usermod {
       esp_transport_ws_set_config(ws, &cfg);
 
       DEBUG_PRINTF_P(PSTR("CloudLink: connecting %s://%s:%u%s\n"), sTls ? "wss" : "ws", sHost.c_str(), sPort, sPath.c_str());
-      if (esp_transport_connect(ws, sHost.c_str(), sPort, CL_CONNECT_TIMEOUT_MS) < 0) {
+      // JTS-CORE0-WDT (2026-09-23): the handshake's certificate verifies and key exchange run as one
+      // unbroken block of ECC math on this task, which is pinned to core 0 at priority 1. The SDK's
+      // task watchdog panics if core 0's idle task is starved for 10 s (CONFIG_ESP_TASK_WDT_PANIC=y),
+      // and that is what rebooted the board seconds after every WiFi join once the handshake began
+      // to succeed. Arduino's documented answer for a long-running core-0 task: take idle0 off the
+      // watchdog for the duration, put it back after. Nothing else on this task runs that long.
+#if !CONFIG_FREERTOS_UNICORE
+      disableCore0WDT();
+#endif
+      int connectRc = esp_transport_connect(ws, sHost.c_str(), sPort, CL_CONNECT_TIMEOUT_MS);
+#if !CONFIG_FREERTOS_UNICORE
+      enableCore0WDT();
+#endif
+      if (connectRc < 0) {
         // Diagnostic-only: also added in IDF5.0, absent on IDF4.4.8. Losing it only means a
         // failed handshake reports as the generic connect error below rather than the HTTP
         // status the server rejected it with — the connection still correctly fails either way.

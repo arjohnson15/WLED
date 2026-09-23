@@ -12,3 +12,13 @@
 // (release 75). The software implementation in sha512.c is the exact code the host reproduction
 // ran the real certificate chain through. Certificates are small; speed is irrelevant here.
 #undef MBEDTLS_SHA512_ALT
+
+// JTS-ECP-NIST-OPTIM (2026-09-23): fast modular reduction for the NIST curves. Tasmota's sdkconfig
+// has CONFIG_MBEDTLS_ECP_C off entirely, so CONFIG_MBEDTLS_ECP_NIST_OPTIM was never set and the
+// package's esp_config.h leaves it undefined -- every P-384 point operation in our vendored ecp.c
+// then falls back to generic division-based reduction, several times slower. Four P-384 signature
+// verifies plus the key exchange, back to back on one core with nothing yielding, starved core 0's
+// idle task past the task watchdog's 10 s (CONFIG_ESP_TASK_WDT_PANIC=y in this SDK) and rebooted
+// the board a few seconds after every WiFi join (releases 69-80). Espressif's own IDF builds set
+// this on; it only touches sources this library compiles.
+#define MBEDTLS_ECP_NIST_OPTIM

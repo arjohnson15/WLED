@@ -63,6 +63,12 @@
  *    implementation (jts_mbedtls_config.h undefines MBEDTLS_SHA512_ALT): the package's hardware
  *    port object is empty, and the software code is what the host reproduction verified. If this
  *    fires, the -DMBEDTLS_CONFIG_FILE override in library.json did not take effect. */
+// 8. NIST fast reduction must be on: without it a P-384 chain verify runs long enough to trip
+//    the core-0 task watchdog (see jts_mbedtls_config.h, JTS-ECP-NIST-OPTIM).
+#if !defined(MBEDTLS_ECP_NIST_OPTIM)
+#error "JTS TLS: MBEDTLS_ECP_NIST_OPTIM is not defined -- jts_mbedtls_config.h did not take effect"
+#endif
+
 #if defined(MBEDTLS_SHA512_ALT)
 #error "idf4_tls_from_source: SHA-512 must be the software implementation (MBEDTLS_SHA512_ALT is set; is jts_mbedtls_config.h in use?)"
 #endif
