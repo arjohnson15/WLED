@@ -41,6 +41,7 @@ check "board picker script"       wled00/data/settings_leds.htm        "JTS-BOAR
 check "board picker is called"    wled00/data/settings_leds.htm        "jtsFillBoards()"
 check "AP client count fix (start)" wled00/network.cpp                 "JTS-APCLIENTS-FIX-START"
 check "AP client count fix (end)"   wled00/network.cpp                 "JTS-APCLIENTS-FIX-END"
+check "ring log leaves GPIO1 free" wled00/wled.cpp "JTS-NET-RINGLOG (2026-09-24)"
 check "login-first setup gate"         usermods/DirectAuth/DirectAuth.cpp "JTS-LOGIN-FIRST"
 
 if [ $fail -ne 0 ]; then

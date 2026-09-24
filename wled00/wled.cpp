@@ -442,7 +442,10 @@ void WLED::setup()
   usePWMFixedNMI(); // link the NMI fix
 #endif
 
-#if defined(WLED_DEBUG) && !defined(WLED_DEBUG_HOST)
+// JTS-NET-RINGLOG (2026-09-24): with the ring-buffer log, debug output never touches the UART, so
+// GPIO1 must stay free -- on a QuinLED Dig-Quad it is LED output 3, and reserving it here made
+// that output vanish (and output 4 with it, its LEDs falling past the end of the shortened strip).
+#if defined(WLED_DEBUG) && !defined(WLED_DEBUG_HOST) && !defined(WLED_NET_RINGLOG)
   PinManager::allocatePin(hardwareTX, true, PinOwner::DebugOut); // TX (GPIO1 on ESP32) reserved for debug output
 #endif
 #ifdef WLED_ENABLE_DMX //reserve GPIO2 as hardcoded DMX pin
