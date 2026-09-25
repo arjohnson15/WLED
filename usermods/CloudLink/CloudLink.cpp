@@ -514,7 +514,22 @@ class CloudLinkUsermod : public Usermod {
       } else if (method == "POST" && isJson && (sub == "" || sub == "/state" || sub == "/si")) {
         JsonObject body = root["body"];
         if (body.isNull()) status = 400;
-        else { deserializeState(body, CALL_MODE_DIRECT_CHANGE); target = Target::state; }
+        else {
+          // JTS-CMD-PRESET (2026-09-25): for an API-call or playlist preset ("o" present with
+          // "psave") savePreset() writes the WHOLE parsed document to presets.json, assuming the
+          // document is the state object. Here the document is the relay frame, so the file got
+          // {"type":"req",...,"body":{"win":"T=0"}} and applyPreset() found no command at the
+          // top level — a 10 PM "Turn off" schedule fired into nothing. Hoist the body to the
+          // root first; id/method/path were already copied out above and the response is built
+          // in a cleared pDoc, so nothing else reads the frame after this point.
+          if (!body["psave"].isNull() && !body["o"].isNull()) {
+            root.remove("type"); root.remove("id"); root.remove("method"); root.remove("path");
+            for (JsonPair kv : body) root[kv.key()] = kv.value();
+            root.remove("body");
+            body = root;
+          }
+          deserializeState(body, CALL_MODE_DIRECT_CHANGE); target = Target::state;
+        }
       } else if (pathOnly.startsWith("/win")) {
         unloadPlaylist();   // the HTTP handler does this before handleSet(); with request == nullptr handleSet() skips it
         handleSet(nullptr, fullPath, true);
