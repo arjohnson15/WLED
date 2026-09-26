@@ -64,7 +64,11 @@ static bool inSameSubnet(const IPAddress &client) {
 }
 
 static bool inLocalSubnet(const IPAddress &client) {
-  return  inSubnet(client, IPAddress(10,0,0,0),    IPAddress(255,0,0,0))                  // 10.x.x.x
+  // JTS-LOOPBACK-LOCAL: 127.x is the controller itself. The JTS cloud replays settings saves over
+  // loopback (CloudLink's HTTP passthrough), and without this every native settings save through
+  // the cloud was answered "Access Denied / Redirecting...". Nothing off-device can use 127.x.
+  return  inSubnet(client, IPAddress(127,0,0,0),   IPAddress(255,0,0,0))                  // loopback (JTS)
+      ||  inSubnet(client, IPAddress(10,0,0,0),    IPAddress(255,0,0,0))                  // 10.x.x.x
       ||  inSubnet(client, IPAddress(192,168,0,0), IPAddress(255,255,0,0))                // 192.168.x.x
       ||  inSubnet(client, IPAddress(172,16,0,0),  IPAddress(255,240,0,0))                // 172.16.x.x
       || (inSubnet(client, IPAddress(4,3,2,0),     IPAddress(255,255,255,0)) && apActive) // WLED AP

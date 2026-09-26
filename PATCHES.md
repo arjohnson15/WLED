@@ -33,6 +33,7 @@ re-apply if an upstream merge drops it.
 | `wled00/data/settings_wifi.htm` | the "JTS Lights cloud" section (server, pairing code, TLS) plus its script, and `onsubmit="return clOnSubmit(event)"` on the form |
 | `wled00/data/update.htm` | an "Update from JTS Lights cloud" button above Manual upload, which asks the cloud to push the newest build |
 | `wled00/data/settings_leds.htm` | a "Controller board" picker that fills in the data, button and relay pins for known boards |
+| `wled00/wled_server.cpp` | `inLocalSubnet()` also accepts loopback (127.0.0.0/8), `JTS-LOOPBACK-LOCAL`. The cloud's HTTP passthrough replays a native settings save on 127.0.0.1; stock WLED refuses any settings POST from outside the private ranges with "Access Denied / Redirecting…", so without this no settings page could be saved through the cloud (2026-09-26) |
 | `wled00/network.cpp` | `WiFiEvent()` `AP_STADISCONNECTED`: `apClients` is decremented only when above zero, so an unmatched disconnect can no longer underflow it to 255 and stop the board ever re-attempting its STA connection |
 
 If an upstream release rewrites any of these, git may merge without a conflict yet drop our
